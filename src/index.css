@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Professional Chat Platform Design System */
+    --background: 0 0% 100%;
+    --foreground: 222 84% 4.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 84% 4.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 84% 4.9%;
+
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 84% 4.9%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 46.9%;
+
+    --accent: 217 91% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 217 91% 60%;
+
+    --radius: 0.75rem;
+
+    /* Professional chat colors */
+    --chat-primary: 217 91% 60%;
+    --chat-secondary: 262 83% 58%;
+    --chat-accent: 142 86% 51%;
+    --chat-warning: 43 96% 56%;
+    --chat-online: 142 86% 51%;
+    --chat-away: 43 96% 56%;
+    --chat-offline: 215 16% 46.9%;
+    
+    /* Professional gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(217 91% 60%), hsl(217 91% 50%));
+    --gradient-secondary: linear-gradient(135deg, hsl(262 83% 58%), hsl(262 83% 48%));
+    --gradient-hero: linear-gradient(135deg, hsl(217 91% 60% / 0.05) 0%, hsl(262 83% 58% / 0.05) 100%);
+    --gradient-card: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(210 40% 98%) 100%);
+    
+    /* Professional shadows */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  }
+
+  .dark {
+    --background: 222 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 217 32% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 217 32% 8%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 84% 4.9%;
+
+    --secondary: 217 32% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 32% 17.5%;
+    --muted-foreground: 215 20% 65.1%;
+
+    --accent: 217 32% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 32% 17.5%;
+    --input: 217 32% 17.5%;
+    --ring: 217 91% 60%;
+
+    --gradient-card: linear-gradient(135deg, hsl(217 32% 8%) 0%, hsl(217 32% 12%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(222 84% 4.9%) 0%, hsl(217 32% 8%) 100%);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply h-full;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans h-full;
+    background: var(--gradient-hero);
+    background-attachment: fixed;
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  #root {
+    @apply h-full;
+  }
+  
+  .chat-gradient {
+    background: var(--gradient-primary);
+  }
+  
+  .chat-gradient-secondary {
+    background: var(--gradient-secondary);
+  }
+  
+  .card-gradient {
+    background: var(--gradient-card);
+    backdrop-filter: blur(8px);
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-md);
+  }
+  
+  .professional-card {
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+  }
+  
+  .professional-card:hover {
+    box-shadow: var(--shadow-md);
+    border-color: hsl(var(--primary) / 0.3);
+  }
+  
+  .status-online {
+    color: hsl(var(--chat-online));
+  }
+  
+  .status-away {
+    color: hsl(var(--chat-away));
+  }
+  
+  .status-offline {
+    color: hsl(var(--chat-offline));
+  }
+  
+  .smooth-transition {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .rdp-caption_dropdowns {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .rdp-dropdown {
+    background-color: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) - 6px);
+    padding: 0.25rem 0.75rem;
+    font-size: 0.875rem;
+  }
+
+  .rdp-dropdown:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px hsl(var(--ring) / 0.5);
+  }
+  
+  /* Premium star shining animation */
+  .premium-star {
+    animation: star-shine 2s ease-in-out infinite;
+    filter: drop-shadow(0 0 4px rgba(168, 85, 247, 0.5));
+  }
+  
+  @keyframes star-shine {
+    0% { 
+      color: rgb(168 85 247);
+      filter: drop-shadow(0 0 4px rgba(168, 85, 247, 0.5));
+      transform: scale(1);
+    }
+    25% { 
+      color: rgb(217 70 239);
+      filter: drop-shadow(0 0 6px rgba(217, 70, 239, 0.7));
+      transform: scale(1.05);
+    }
+    50% { 
+      color: rgb(236 72 153);
+      filter: drop-shadow(0 0 8px rgba(236, 72, 153, 0.8));
+      transform: scale(1.1);
+    }
+    75% { 
+      color: rgb(168 85 247);
+      filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.7));
+      transform: scale(1.05);
+    }
+    100% { 
+      color: rgb(168 85 247);
+      filter: drop-shadow(0 0 4px rgba(168, 85, 247, 0.5));
+      transform: scale(1);
+    }
+  }
+}
