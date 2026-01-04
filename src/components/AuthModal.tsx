@@ -547,17 +547,23 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
 
       try {
         setIsSigningIn(true);
-        
+
         // Simulate sign in delay
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Sign in allows email or username
-        onAuth('email', { emailOrUsername, password, isSignUp });
-      } catch (error) {
+
+        // Sign in allows email or username - await so we can catch errors and show them to the user
+        await onAuth('email', { emailOrUsername, password, isSignUp });
+      } catch (error: any) {
+        const msg = error?.message || error?.response?.data?.message || 'Invalid credentials. Please try again.';
+
+        // Show inline validation where appropriate
+        setValidationErrors(prev => ({ ...prev, email: msg }));
+        setFieldTouched(prev => ({ ...prev, email: true }));
+
         toast({
-          title: "Sign in failed",
-          description: "Invalid credentials. Please try again.",
-          variant: "destructive"
+          title: 'Sign in failed',
+          description: msg,
+          variant: 'destructive'
         });
         incrementAttempts();
       } finally {

@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button';
 import { AccountSettingsContent } from '@/components/UserSettingsDrawer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { Slider } from '@/components/ui/slider';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   AlertDialog,
@@ -26,6 +28,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { format, formatDistanceToNow } from 'date-fns';
+import { playNotificationSound, unlockAudio } from '@/lib/notificationSound';
 
 interface DeletionStatus {
   pending: boolean;
@@ -261,6 +264,11 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
     profilePhotoVisibility: 'everyone' as 'everyone' | 'friends'
   });
 
+  const [notificationPrefs, setNotificationPrefs] = useState({
+    alertsEnabled: true,
+    alertVolume: 80
+  });
+
   const handleDmScopeChange = (value: 'everyone' | 'friends') => {
     (async () => {
       setPrivacyState((prev) => ({ ...prev, dmScope: value }));
@@ -284,6 +292,14 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
       const pv = (currentUser as any).settings.profilePhotoVisibility as 'everyone' | 'friends';
       setPrivacyState((prev) => ({ ...prev, profilePhotoVisibility: pv }));
     }
+    // initialize notification preferences from user settings if present
+    if (currentUser && (currentUser as any).settings && (currentUser as any).settings.notifications) {
+      const notif = (currentUser as any).settings.notifications;
+      setNotificationPrefs({
+        alertsEnabled: typeof notif.soundEnabled === 'boolean' ? notif.soundEnabled : true,
+        alertVolume: typeof notif.alertVolume === 'number' ? notif.alertVolume : 80
+      });
+    }
   }, [currentUser]);
 
   const handleProfilePhotoVisibilityChange = async (value: 'everyone' | 'friends') => {
@@ -298,6 +314,50 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
       });
     } catch (err) {
       toast({ title: 'Unable to update profile photo visibility', variant: 'destructive' });
+    }
+  };
+
+  const handleNotificationToggle = async (checked: boolean) => {
+    setNotificationPrefs(prev => ({ ...prev, alertsEnabled: checked }));
+    try {
+      if (currentUser && currentUser.id) {
+        const updatedSettings = { ...(currentUser as any).settings, notifications: { ...(currentUser as any).settings?.notifications, soundEnabled: checked, alertVolume: notificationPrefs.alertVolume } };
+        await UserService.updateUser(currentUser.id, { settings: updatedSettings });
+      }
+      // persist locally so sound playback can read quickly
+      try { localStorage.setItem('chitz_alerts_enabled', checked ? '1' : '0'); } catch {}
+      toast({ title: 'Notification preference updated', description: checked ? 'Alerts enabled' : 'Alerts disabled' });
+    } catch (err) {
+      console.warn('Failed to update notification setting', err);
+      toast({ title: 'Unable to update notification setting', variant: 'destructive' });
+    }
+  };
+
+  const handleNotificationVolumeChange = async (value: number[]) => {
+    const vol = Array.isArray(value) ? value[0] : Number(value) || 0;
+    setNotificationPrefs(prev => ({ ...prev, alertVolume: vol }));
+    try {
+      if (currentUser && currentUser.id) {
+        const updatedSettings = { ...(currentUser as any).settings, notifications: { ...(currentUser as any).settings?.notifications, alertVolume: vol, soundEnabled: notificationPrefs.alertsEnabled } };
+        await UserService.updateUser(currentUser.id, { settings: updatedSettings });
+      }
+      try { localStorage.setItem('chitz_alert_volume', String(vol)); } catch {}
+      toast({ title: 'Notification volume updated', description: `Volume set to ${vol}%` });
+
+      // Play a short preview at the selected volume if alerts are enabled
+      try {
+        const alertsEnabledLocal = localStorage.getItem('chitz_alerts_enabled') !== '0';
+        if (alertsEnabledLocal) {
+          // attempt to unlock audio (no-op if already allowed)
+          unlockAudio();
+          playNotificationSound(Math.max(0, Math.min(1, vol / 100)));
+        }
+      } catch (e) {
+        // ignore preview errors
+      }
+    } catch (err) {
+      console.warn('Failed to update notification volume', err);
+      toast({ title: 'Unable to update volume', variant: 'destructive' });
     }
   };
 
@@ -336,6 +396,27 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
               <SelectItem value="friends">Friends only</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+        <div className="rounded-xl border border-border/60 px-4 py-4 space-y-3">
+          <div>
+            <Label className="text-base">Notification alerts</Label>
+            <p className="text-sm text-muted-foreground">Toggle audible alerts for site notifications (DMs, mentions). Use the slider to set alert volume.</p>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex-1 pr-4">
+              <div className="mb-2">
+                <Switch checked={notificationPrefs.alertsEnabled} onCheckedChange={handleNotificationToggle} />
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-full">
+                  <Slider value={[notificationPrefs.alertVolume]} onValueChange={handleNotificationVolumeChange} max={100} min={0} step={1} />
+                </div>
+                <div className="w-12 text-right">
+                  <span className="font-medium">{notificationPrefs.alertVolume}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div className="rounded-xl border border-border/60 px-4 py-4 space-y-3">
           <div>

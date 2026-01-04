@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { playNotificationSound } from '@/lib/notificationSound';
 
 export interface Message {
   id: string;
@@ -51,6 +52,18 @@ export const useChat = (roomName: string) => {
       ...prev,
       messages: [...prev.messages, newMessage]
     }));
+
+    try {
+      // Play sound for incoming messages not sent by current user and not system messages
+      const alertsEnabled = localStorage.getItem('chitz_alerts_enabled');
+      const enabled = alertsEnabled === null ? true : alertsEnabled === '1';
+      if (enabled && newMessage.userId !== 'current-user' && newMessage.type !== 'system') {
+        const vol = Number(localStorage.getItem('chitz_alert_volume') || '70') / 100;
+        playNotificationSound(Number.isFinite(vol) ? vol : 0.7);
+      }
+    } catch (e) {
+      // ignore
+    }
   }, []);
 
   const simulateTyping = useCallback(() => {

@@ -1,3 +1,4 @@
+import { apiClient } from '@/lib/apiClient';
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +18,7 @@ import { UserActionsMenu } from "@/components/UserActionsMenu";
 import { MuteDurationModal } from "@/components/MuteDurationModal";
 import { MuteCountdown } from "@/components/MuteCountdown";
 import { toast } from "@/hooks/use-toast";
+import { useNavigate } from 'react-router-dom';
 import { 
   Send, 
   Smile, 
@@ -146,6 +148,7 @@ interface ChatRoomProps {
 }
 
 export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, currentUser, roomImage, onNextRandomChat, dmPartnerId, dmPartnerName, dmPartnerAvatar }: ChatRoomProps) => {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -187,6 +190,9 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const [pinnedMessages, setPinnedMessages] = useState<Message[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+    const [viewedMap, setViewedMap] = useState<Record<string, number>>({});
+    const [previewOpen, setPreviewOpen] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -282,6 +288,26 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       }
     };
   }, [mediaRecorder]);
+
+  const markMessageViewed = async (messageId: string, durationSeconds = 10) => {
+    try {
+      const resp: any = await apiClient.post(`/messages/${messageId}/view`, { durationSeconds });
+      const expireAt = resp?.expireAt ? new Date(resp.expireAt).getTime() : Date.now() + durationSeconds * 1000;
+      setViewedMap(prev => ({ ...prev, [messageId]: expireAt }));
+      const timeout = expireAt - Date.now();
+      if (timeout > 0) {
+        setTimeout(() => {
+          setViewedMap(prev => {
+            const copy = { ...prev };
+            delete copy[messageId];
+            return copy;
+          });
+        }, timeout);
+      }
+    } catch (e) {
+      // ignore
+    }
+  };
 
   const handleSendMessage = () => {
     if (!newMessage.trim() || isRecording) return;
@@ -422,15 +448,18 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const handleViewProfile = (userId: string) => {
     const user = groupMembers.find(m => m.id === userId);
     const userName = user?.name || "User";
-    
-    toast({
-      title: "Profile",
-      description: `Viewing ${userName}'s profile...`,
-      duration: 2000
-    });
-    
-    // TODO: Implement profile modal or navigation
-    console.log(`Viewing profile for user: ${userId} (${userName})`);
+
+    // Navigate to the profile page with userId as query param
+    try {
+      navigate(`/profile?userId=${encodeURIComponent(userId)}`);
+    } catch (e) {
+      toast({
+        title: 'Profile',
+        description: `Viewing ${userName}'s profile...`,
+        duration: 2000
+      });
+      console.log(`Viewing profile for user: ${userId} (${userName})`);
+    }
   };
 
   const handleAddFriend = (userId: string) => {
@@ -1302,6 +1331,8 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                     <>
                       <DropdownMenuItem onClick={() => setShowGroupRules(true)}>
                         <FileText className="w-4 h-4 mr-2" />
+
+                // Preview dialog at end of file (rendered by ChatRoom via state)
                         Group Info
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={handleShareRoom}>
@@ -1550,7 +1581,21 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                           <div className="mb-2 space-y-2">
                             {msg.attachments.map((a, idx) => (
                               a.mimeType && a.mimeType.startsWith('image') ? (
-                                <img key={idx} src={a.url} alt={a.fileName} className="max-w-full rounded-md mb-2" />
+                                (() => {
+                                  const expiredForYou = !!viewedMap[msg.id] && Date.now() > viewedMap[msg.id];
+                                  if (expiredForYou) {
+                                    return (
+                                      <div key={idx} className="w-full rounded-md mb-2 bg-black/5 text-center py-6 text-sm text-muted-foreground">Image expired for you</div>
+                                    );
+                                  }
+                                  return (
+                                    <img key={idx} src={a.url} alt={a.fileName} className="max-w-full rounded-md mb-2 cursor-pointer" onClick={() => {
+                                      setPreviewUrl(a.url);
+                                      setPreviewOpen(true);
+                                      markMessageViewed(msg.id, 10);
+                                    }} onContextMenu={(e) => e.preventDefault()} draggable={false} />
+                                  );
+                                })()
                               ) : a.mimeType && a.mimeType.startsWith('audio') ? (
                                 <audio key={idx} controls src={a.url} className="w-full rounded-md mb-2" />
                               ) : (
@@ -2283,6 +2328,19 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
               )}
             </div>
           </ScrollArea>
+        </DialogContent>
+      </Dialog>
+      {/* Image preview for attachments */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Image preview</DialogTitle>
+          </DialogHeader>
+          {previewUrl ? (
+            <img src={previewUrl} alt="Preview" className="w-full h-auto rounded-md object-contain" />
+          ) : (
+            <p className="text-sm text-muted-foreground">No image</p>
+          )}
         </DialogContent>
       </Dialog>
     </div>
