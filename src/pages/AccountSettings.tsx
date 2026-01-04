@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
+import { UserService } from '@/lib/app-data';
 import { AuthUser } from '@/lib/auth-new';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -253,16 +254,51 @@ interface PrivacySettingsSectionProps {
 
 const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
   const { toast } = useToast();
+  const { currentUser } = useAuth();
+
   const [privacyState, setPrivacyState] = useState({
-    dmScope: 'everyone' as 'everyone' | 'friends'
+    dmScope: 'everyone' as 'everyone' | 'friends',
+    profilePhotoVisibility: 'everyone' as 'everyone' | 'friends'
   });
 
   const handleDmScopeChange = (value: 'everyone' | 'friends') => {
-    setPrivacyState((prev) => ({ ...prev, dmScope: value }));
-    toast({
-      title: 'Private messages updated',
-      description: value === 'everyone' ? 'Anyone can DM you now.' : 'Only friends can DM you now.'
-    });
+    (async () => {
+      setPrivacyState((prev) => ({ ...prev, dmScope: value }));
+      try {
+        if (currentUser && currentUser.id) {
+          await UserService.updateUser(currentUser.id, { settings: { ...(currentUser as any).settings, dmScope: value } });
+        }
+        toast({
+          title: 'Private messages updated',
+          description: value === 'everyone' ? 'Anyone can DM you now.' : 'Only friends can DM you now.'
+        });
+      } catch (err) {
+        toast({ title: 'Unable to update DM settings', description: 'Please try again later.', variant: 'destructive' });
+      }
+    })();
+  };
+
+  // initialize profile visibility from current user settings when available
+  useEffect(() => {
+    if (currentUser && (currentUser as any).settings && (currentUser as any).settings.profilePhotoVisibility) {
+      const pv = (currentUser as any).settings.profilePhotoVisibility as 'everyone' | 'friends';
+      setPrivacyState((prev) => ({ ...prev, profilePhotoVisibility: pv }));
+    }
+  }, [currentUser]);
+
+  const handleProfilePhotoVisibilityChange = async (value: 'everyone' | 'friends') => {
+    setPrivacyState((prev) => ({ ...prev, profilePhotoVisibility: value }));
+    try {
+      if (currentUser && currentUser.id) {
+        await UserService.updateUser(currentUser.id, { settings: { ...(currentUser as any).settings, profilePhotoVisibility: value } });
+      }
+      toast({
+        title: 'Profile photo visibility updated',
+        description: value === 'everyone' ? 'Your profile photo is visible to everyone.' : 'Only friends can see your profile photo.'
+      });
+    } catch (err) {
+      toast({ title: 'Unable to update profile photo visibility', variant: 'destructive' });
+    }
   };
 
   return (
@@ -290,6 +326,25 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
           <Select
             value={privacyState.dmScope}
             onValueChange={(value) => handleDmScopeChange(value as 'everyone' | 'friends')}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-full sm:w-64">
+              <SelectValue placeholder="Select audience" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="everyone">Everyone</SelectItem>
+              <SelectItem value="friends">Friends only</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="rounded-xl border border-border/60 px-4 py-4 space-y-3">
+          <div>
+            <Label className="text-base">Who can see your profile photo?</Label>
+            <p className="text-sm text-muted-foreground">Control who can view your profile photo.</p>
+          </div>
+          <Select
+            value={privacyState.profilePhotoVisibility}
+            onValueChange={(value) => handleProfilePhotoVisibilityChange(value as 'everyone' | 'friends')}
             disabled={disabled}
           >
             <SelectTrigger className="w-full sm:w-64">

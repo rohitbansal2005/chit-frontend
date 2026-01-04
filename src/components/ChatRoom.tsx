@@ -23,8 +23,6 @@ import {
   MoreVertical, 
   Plus,
   Search,
-  Phone,
-  Video,
   Info,
   ArrowLeft,
   Mic,
@@ -48,6 +46,8 @@ import {
   Eye,
   SkipForward
 } from "lucide-react";
+import { uploadToCloudinary } from "@/lib/cloudinary";
+import { RoomService } from "@/lib/app-data";
 
 interface Message {
   id: string;
@@ -55,8 +55,9 @@ interface Message {
   message: string;
   time: string;
   avatar: string;
-  type: 'text' | 'system';
+  type: 'text' | 'system' | 'image';
   userId: string;
+  attachments?: { url: string; fileName: string; fileSize: number; mimeType: string }[];
   replyTo?: string;
   edited?: boolean;
   pinned?: boolean;
@@ -131,6 +132,7 @@ interface MutedUser {
 }
 
 interface ChatRoomProps {
+  roomId?: string;
   roomName: string;
   roomType: 'public' | 'private' | 'dm';
   participants: number;
@@ -138,9 +140,12 @@ interface ChatRoomProps {
   currentUser?: User;
   roomImage?: string;
   onNextRandomChat?: () => void; // For random chat functionality
+  dmPartnerId?: string;
+  dmPartnerName?: string;
+  dmPartnerAvatar?: string;
 }
 
-export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser, roomImage, onNextRandomChat }: ChatRoomProps) => {
+export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, currentUser, roomImage, onNextRandomChat, dmPartnerId, dmPartnerName, dmPartnerAvatar }: ChatRoomProps) => {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -151,42 +156,6 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
       type: "system",
       userId: "system",
       timestamp: Date.now()
-    },
-    {
-      id: "2",
-      user: "Alice",
-      message: "Hey everyone! How's it going? 😊",
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      avatar: "A",
-      type: "text",
-      userId: "user-alice",
-      userRole: "admin",
-      userIsPremium: true,
-      pinned: true,
-      pinnedBy: "Admin",
-      pinnedAt: "2 hours ago",
-      reactions: {
-        "👍": ["user-bob", "user-charlie"],
-        "❤️": ["user-bob"]
-      }
-    },
-    {
-      id: "3",
-      user: "Bob",
-      message: "Great! Just working on some new features. The new reactions are awesome! 🚀",
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      avatar: "B",
-      type: "text",
-      userId: "user-bob",
-      userRole: "member",
-      userIsPremium: true,
-      pinned: true,
-      pinnedBy: "Owner",
-      pinnedAt: "1 hour ago",
-      reactions: {
-        "🔥": ["user-alice", "current-user"],
-        "💯": ["user-alice"]
-      }
     }
   ]);
   const [newMessage, setNewMessage] = useState("");
@@ -235,50 +204,26 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
     }
   });
 
-  const [groupMembers] = useState<GroupMember[]>([
-    {
-      id: "current-user",
-      name: currentUser?.name || "You",
-      avatar: currentUser?.name?.charAt(0).toUpperCase() || "Y",
-      role: "owner",
-      joinedDate: "Dec 2024",
-      status: "online"
-    },
-    {
-      id: "user-alice",
-      name: "Alice",
-      avatar: "A",
-      role: "admin",
-      joinedDate: "Dec 2024",
-      status: "online",
-      isPremium: true
-    },
-    {
-      id: "user-bob",
-      name: "Bob",
-      avatar: "B",
-      role: "member",
-      joinedDate: "Dec 2024",
-      status: "online",
-      isPremium: true
-    },
-    {
-      id: "user-charlie",
-      name: "Charlie",
-      avatar: "C",
-      role: "member",
-      joinedDate: "Dec 2024",
-      status: "offline"
-    },
-    {
-      id: "user-david",
-      name: "David",
-      avatar: "D",
-      role: "member",
-      joinedDate: "Nov 2024",
-      status: "offline"
-    }
-  ]);
+  const initialMembers: GroupMember[] = [];
+  initialMembers.push({
+    id: "current-user",
+    name: currentUser?.name || "You",
+    avatar: currentUser?.name?.charAt(0).toUpperCase() || "Y",
+    role: "owner",
+    joinedDate: new Date().toLocaleDateString(),
+    status: "online"
+  });
+  if (dmPartnerId) {
+    initialMembers.push({
+      id: dmPartnerId,
+      name: dmPartnerName || "Participant",
+      avatar: (dmPartnerAvatar && dmPartnerAvatar.split('/').pop()?.charAt(0).toUpperCase()) || (dmPartnerName ? dmPartnerName.charAt(0).toUpperCase() : 'P'),
+      role: 'member',
+      joinedDate: new Date().toLocaleDateString(),
+      status: 'online'
+    });
+  }
+  const [groupMembers] = useState<GroupMember[]>(initialMembers);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -365,28 +310,7 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
       };
       setMessages(prev => [...prev, message]);
       
-      // Simulate someone else typing and responding
-      setIsTyping(true);
-      setTimeout(() => {
-        setIsTyping(false);
-        const responses = [
-          "That's interesting! Tell me more 😊",
-          "I agree with that point of view",
-          "Thanks for sharing that!",
-          "Great conversation topic!",
-          "What's your experience with that?"
-        ];
-        const response: Message = {
-          id: (Date.now() + 1).toString(),
-          user: "Alex",
-          message: responses[Math.floor(Math.random() * responses.length)],
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          avatar: "A",
-          type: "text",
-          userId: "alex-123"
-        };
-        setMessages(prev => [...prev, response]);
-      }, 2000);
+      // No simulated responses; real app should rely on server messages
     }
 
     setNewMessage("");
@@ -725,10 +649,38 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
     };
     reader.readAsDataURL(file);
 
-    // Clear file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    // Upload to Cloudinary and send as message
+    (async () => {
+      try {
+        toast({ title: 'Uploading image...' });
+        const res = await uploadToCloudinary(file, 'chitz/chat');
+        const attachment = { url: res.url, fileName: file.name, fileSize: file.size, mimeType: file.type };
+        const message: Message = {
+          id: Date.now().toString(),
+          user: currentUser?.name || 'You',
+          message: `📷 Image: ${file.name}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          avatar: currentUser?.avatar || currentUser?.name?.charAt(0).toUpperCase() || 'Y',
+          type: 'image',
+          userId: 'current-user',
+          userRole: 'owner',
+          userIsPremium: false,
+          timestamp: Date.now(),
+          attachments: [attachment]
+        };
+
+        setMessages(prev => [...prev, message]);
+        setSelectedImage(null);
+        setSelectedImagePreview(null);
+        toast({ title: 'Image sent', description: 'Your image has been shared' });
+      } catch (err) {
+        console.error('Upload failed', err);
+        toast({ title: 'Upload failed', description: 'Could not send image', variant: 'destructive' });
+      } finally {
+        // Clear file input
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    })();
   };
 
   const handleEmojiSelect = (emoji: string) => {
@@ -850,27 +802,55 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
 
   const handleUpdateGroupSettings = (newSettings: GroupSettings) => {
     setGroupSettings(newSettings);
-    toast({
-      title: "Group settings updated",
-      description: "Changes have been saved successfully."
-    });
+    // Persist settings if we have a roomId and backend is available
+    (async () => {
+      if (!roomId) {
+        toast({ title: "Group settings updated", description: "Changes saved locally. Connect to backend to persist." });
+        return;
+      }
+      try {
+        await RoomService.updateRoom(roomId, { settings: newSettings });
+        toast({ title: "Group settings updated", description: "Changes have been saved successfully." });
+      } catch (err) {
+        console.warn('Failed to persist group settings', err);
+        toast({ title: "Failed to save settings", description: "Could not persist settings to server.", variant: 'destructive' });
+      }
+    })();
   };
 
   const handleUpdateGroupLogo = (logoUrl: string | undefined) => {
     setCurrentGroupLogo(logoUrl);
     setGroupSettings(prev => ({ ...prev, groupIcon: logoUrl }));
-    toast({
-      title: "Group logo updated",
-      description: "Group appearance has been updated."
-    });
+    (async () => {
+      if (!roomId) {
+        toast({ title: "Group logo updated", description: "Updated locally. Connect to backend to persist." });
+        return;
+      }
+      try {
+        await RoomService.updateRoom(roomId, { settings: { ...(groupSettings || {}), groupIcon: logoUrl } });
+        toast({ title: "Group logo updated", description: "Group appearance has been updated." });
+      } catch (err) {
+        console.warn('Failed to persist group logo', err);
+        toast({ title: "Failed to save logo", description: "Could not persist logo to server.", variant: 'destructive' });
+      }
+    })();
   };
 
   const handleUpdateGroupName = (newName: string) => {
     setCurrentRoomName(newName);
-    toast({
-      title: "Group name updated",
-      description: "Group name has been changed successfully."
-    });
+    (async () => {
+      if (!roomId) {
+        toast({ title: "Group name updated", description: "Updated locally. Connect to backend to persist." });
+        return;
+      }
+      try {
+        await RoomService.updateRoom(roomId, { name: newName });
+        toast({ title: "Group name updated", description: "Group name has been changed successfully." });
+      } catch (err) {
+        console.warn('Failed to persist group name', err);
+        toast({ title: "Failed to save name", description: "Could not persist name to server.", variant: 'destructive' });
+      }
+    })();
   };
 
   const handleUpdateMemberRole = (memberId: string, newRole: 'admin' | 'member') => {
@@ -1006,6 +986,11 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
       userIsPremium: false,
       timestamp: Date.now()
     };
+
+    // Attach audio file URL so it can be played in the UI
+    if (recordedAudioUrl) {
+      message.attachments = [{ url: recordedAudioUrl, fileName: 'voice.wav', fileSize: recordedAudio.size || 0, mimeType: 'audio/wav' }];
+    }
 
     setMessages(prev => [...prev, message]);
     
@@ -1203,15 +1188,12 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
     member.name.toLowerCase().includes(memberSearchQuery.toLowerCase())
   );
 
-  // For DM rooms, create dummy members for search
-  const dmMembers = [
-    { id: 'current-user', name: 'You', status: 'online' },
-    { id: 'dm-partner', name: 'Alex', status: 'online' }
-  ];
-
-  const filteredDMMembers = dmMembers.filter(member => 
-    member.name.toLowerCase().includes(memberSearchQuery.toLowerCase())
-  );
+  // DM partner info is provided via props when rendering a DM from the dashboard
+  const dmPartner = {
+    id: dmPartnerId || undefined,
+    name: dmPartnerName || undefined,
+    avatar: dmPartnerAvatar || undefined
+  };
 
   return (
     <TooltipProvider>
@@ -1242,14 +1224,16 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                 <div className="flex items-center gap-1 md:gap-2">
                   <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse flex-shrink-0"></div>
                   <span className="text-xs md:text-sm text-muted-foreground truncate">
-                    {roomType !== 'dm' && groupSettings.groupDescription ? 
-                      (groupSettings.groupDescription.length > 40 ? 
-                        groupSettings.groupDescription.substring(0, 40) + "..." : 
-                        groupSettings.groupDescription
-                      ) : 
-                      `${participants} members online`
-                    }
-                  </span>
+                      {roomType === 'dm' ? (
+                        'Private direct message'
+                      ) : (roomType !== 'dm' && groupSettings.groupDescription ? 
+                        (groupSettings.groupDescription.length > 40 ? 
+                          groupSettings.groupDescription.substring(0, 40) + "..." : 
+                          groupSettings.groupDescription
+                        ) : 
+                        `${participants} members online`
+                      )}
+                    </span>
                   {roomType === 'private' && (
                     <Badge variant="secondary" className="text-xs hidden sm:inline-flex">Private</Badge>
                   )}
@@ -1268,16 +1252,7 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                 </div>
               )}
               
-              {roomType === 'dm' && (
-                <>
-                  <Button variant="ghost" size="sm" className="hidden sm:flex">
-                    <Phone className="w-4 h-4" />
-                  </Button>
-                  <Button variant="ghost" size="sm" className="hidden sm:flex">
-                    <Video className="w-4 h-4" />
-                  </Button>
-                </>
-              )}
+              {roomType === 'dm' && null}
               {/* Next button for random chat */}
               {roomName.toLowerCase().includes('random') && onNextRandomChat && (
                 <Button 
@@ -1374,15 +1349,11 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                   {/* DM-specific options */}
                   {roomType === 'dm' && (
                     <>
-                      <DropdownMenuItem onClick={() => handleViewProfile(dmMembers.find(m => m.id !== 'current-user')?.id)}>
+                      <DropdownMenuItem onClick={() => handleViewProfile(dmPartner.id)}>
                         <Eye className="w-4 h-4 mr-2" />
                         View Profile
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleAddFriend(dmMembers.find(m => m.id !== 'current-user')?.id)}>
-                        <UserPlus className="w-4 h-4 mr-2" />
-                        Add Friend
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockUser(dmMembers.find(m => m.id !== 'current-user')?.id)} className="text-red-600 focus:text-red-600">
+                      <DropdownMenuItem onClick={() => handleBlockUser(dmPartner.id)} className="text-red-600 focus:text-red-600">
                         <Ban className="w-4 h-4 mr-2" />
                         Block User
                       </DropdownMenuItem>
@@ -1479,14 +1450,17 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                       {msg.userId !== 'current-user' && (
                         <div className="flex items-center gap-2 mb-1 justify-between">
                           <div className="flex items-center gap-2 min-w-0">
-                            <span 
-                              className="font-medium text-sm truncate cursor-pointer hover:text-primary transition-colors"
-                              onClick={() => handleMentionUser(msg.userId)}
-                              title="Click to mention in chat"
-                            >
-                              {msg.user}
-                            </span>
-                            {msg.userRole === 'owner' && (
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span 
+                                className="font-medium text-sm truncate cursor-pointer hover:text-primary transition-colors"
+                                onClick={() => handleMentionUser(msg.userId)}
+                                title="Click to mention in chat"
+                              >
+                                {msg.user}
+                              </span>
+                              {/* User actions moved to message-level menu on the right side; removed duplicate here */}
+                            </div>
+                            {roomType !== 'dm' && msg.userRole === 'owner' && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Crown className="w-3 h-3 text-yellow-500 cursor-help" />
@@ -1496,7 +1470,7 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                                 </TooltipContent>
                               </Tooltip>
                             )}
-                            {msg.userRole === 'admin' && (
+                            {roomType !== 'dm' && msg.userRole === 'admin' && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Shield className="w-3 h-3 text-blue-500 cursor-help" />
@@ -1572,6 +1546,21 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                             <span>Pinned message</span>
                           </div>
                         )}
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="mb-2 space-y-2">
+                            {msg.attachments.map((a, idx) => (
+                              a.mimeType && a.mimeType.startsWith('image') ? (
+                                <img key={idx} src={a.url} alt={a.fileName} className="max-w-full rounded-md mb-2" />
+                              ) : a.mimeType && a.mimeType.startsWith('audio') ? (
+                                <audio key={idx} controls src={a.url} className="w-full rounded-md mb-2" />
+                              ) : (
+                                <a key={idx} href={a.url} target="_blank" rel="noreferrer" className="text-xs text-primary underline">
+                                  {a.fileName || 'Attachment'}
+                                </a>
+                              )
+                            ))}
+                          </div>
+                        )}
                         {msg.message}
                         {msg.userId === 'current-user' && (
                           <div className="absolute -right-2 top-1/2 -translate-y-1/2">
@@ -1627,7 +1616,7 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                       {msg.userId === 'current-user' && (
                         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground mt-1 mr-2">
                           <div className="flex items-center gap-1">
-                            {msg.userRole === 'owner' && (
+                            {roomType !== 'dm' && msg.userRole === 'owner' && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Crown className="w-3 h-3 text-yellow-500 cursor-help" />
@@ -1637,7 +1626,7 @@ export const ChatRoom = ({ roomName, roomType, participants, onBack, currentUser
                                 </TooltipContent>
                               </Tooltip>
                             )}
-                            {msg.userRole === 'admin' && (
+                            {roomType !== 'dm' && msg.userRole === 'admin' && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Shield className="w-3 h-3 text-blue-500 cursor-help" />

@@ -1,4 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { useToast } from '@/hooks/use-toast';
+import { ToastAction } from '@/components/ui/toast';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetFooter } from "@/components/ui/sheet";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { CreateGroupModal } from "@/components/CreateGroupModal";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { PremiumModal } from "@/components/PremiumModal";
 import { StartDMModal } from "@/components/StartDMModal";
 import { DarkModeToggle } from "@/components/DarkModeToggle";
@@ -24,6 +26,9 @@ import {
   AppUser,
   FriendRequest
 } from "@/lib/app-data";
+import { EmojiPicker } from '@/components/EmojiPicker';
+import { ChatRoom as ChatRoomComponent } from '@/components/ChatRoom';
+import { io } from 'socket.io-client';
 import { AuthUser } from "@/lib/auth-new";
 import { 
   Search, 
@@ -55,6 +60,7 @@ import {
   Compass,
   Menu,
   Info,
+  Smile,
   Wrench
 } from "lucide-react";
 import { useAuth } from '@/contexts/AuthContext-new';
@@ -155,7 +161,8 @@ export const ChatDashboard = ({
   externalAction,
   onExternalActionHandled
 }: ChatDashboardProps) => {
-  const { signInAsGuest } = useAuth();
+  const { signInAsGuest, resendEmailVerification } = useAuth();
+  const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTab, setSelectedTab] = useState("public");
   const [showCreateRoom, setShowCreateRoom] = useState(false);
@@ -179,6 +186,7 @@ export const ChatDashboard = ({
   // Backend data states
   const [publicRooms, setPublicRooms] = useState<ChatRoom[]>([]);
   const [directMessages, setDirectMessages] = useState<ChatRoom[]>([]);
+  const [dmPartners, setDmPartners] = useState<Record<string, AppUser>>({});
   const [friendsList, setFriendsList] = useState<AppUser[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<AppUser[]>([]);
@@ -191,9 +199,112 @@ export const ChatDashboard = ({
   const activeRandomRoom = currentRandomRoom || localRandomRoom;
   const isRandomExperienceActive = isRandomChatActive || !!localRandomRoom;
   const activeRandomPartner = (activeRandomRoom as any)?.matchedUser || localRandomPartner || null;
+
+  // Poll messages for active random DM room using a single managed poller
+  const randomPollerRef = useRef<{ roomId?: string; intervalId?: any } | null>(null);
+  useEffect(() => {
+    const room = activeRandomRoom as any;
+    const roomId = room?.id;
+    // Only poll DM rooms
+    if (!roomId || room.type !== 'dm') {
+      if (randomPollerRef.current?.intervalId) {
+        clearInterval(randomPollerRef.current.intervalId);
+        randomPollerRef.current = null;
+      }
+      return;
+    }
+
+    // If we're already polling this room, do nothing
+    if (randomPollerRef.current?.roomId === roomId) return;
+
+    // Clear any previous poller
+    if (randomPollerRef.current?.intervalId) {
+      clearInterval(randomPollerRef.current.intervalId);
+      randomPollerRef.current = null;
+    }
+
+    let cancelled = false;
+
+    const fetchAndMerge = async () => {
+      if (cancelled) return;
+      try {
+        const msgs = await MessageService.getRoomMessages(roomId, 100);
+        const mapped = msgs.map((m: any) => ({
+          id: m.id,
+          text: m.content || m.body || m.message || m.payload || m.text || '',
+          sender: m.senderId === user?.uid ? 'user' : 'partner',
+          timestamp: new Date(m.timestamp || m.createdAt || Date.now()),
+          senderName: m.senderName || (m.senderId === user?.uid ? (user?.displayName || user?.name) : (activeRandomPartner?.displayName || activeRandomPartner?.name || 'Stranger'))
+        }));
+
+        setRandomChatMessages(prev => {
+          const existing = new Map(prev.map(p => [p.id, p]));
+          const newList = [...prev];
+
+          mapped.forEach((mm: any) => {
+            if (existing.has(mm.id)) return;
+
+            const matchIndex = newList.findIndex(p => (
+              p.id?.toString().startsWith('temp-') &&
+              p.sender === mm.sender &&
+              p.text === mm.text &&
+              Math.abs(new Date(p.timestamp).getTime() - new Date(mm.timestamp).getTime()) < 5000
+            ));
+
+            if (matchIndex !== -1) {
+              newList[matchIndex] = mm;
+            } else {
+              newList.push(mm);
+            }
+          });
+
+          return newList;
+        });
+      } catch (err) {
+        // ignore and retry
+      }
+    };
+
+    // do initial fetch, then poll every 5000ms
+    const shouldPollNow = () => {
+      try {
+        if (typeof document !== 'undefined') {
+          // Avoid polling when tab is hidden
+          if (document.hidden) return false;
+        }
+        // avoid polling when window not focused (helps when user switched tab)
+        // @ts-ignore
+        if (typeof window !== 'undefined' && window?.document && typeof window.document.hasFocus === 'function') {
+          // @ts-ignore
+          if (!window.document.hasFocus()) return false;
+        }
+      } catch (e) {
+        // ignore
+      }
+      return true;
+    };
+
+    if (shouldPollNow()) fetchAndMerge();
+    const intervalId = setInterval(() => {
+      if (shouldPollNow()) fetchAndMerge();
+    }, 5000);
+    randomPollerRef.current = { roomId, intervalId };
+
+    return () => {
+      cancelled = true;
+      if (randomPollerRef.current?.intervalId) {
+        clearInterval(randomPollerRef.current.intervalId);
+        randomPollerRef.current = null;
+      }
+    };
+  }, [activeRandomRoom && (activeRandomRoom as any).id, user?.uid, activeRandomPartner && (activeRandomPartner as any).id]);
   const randomPartnerName = activeRandomPartner?.displayName || activeRandomPartner?.name || 'Stranger';
   const activeDMConversation = activeDMRoom ? dmConversations[activeDMRoom.id] || [] : [];
-  const activeDMPartnerName = activeDMRoom?.name || 'Direct Message';
+  const activeDMPartnerName = (
+    activeDMRoom && (
+      activeDMRoom.name || dmPartners[activeDMRoom.id]?.displayName || dmPartners[activeDMRoom.id]?.name
+    )
+  ) || 'Direct Message';
 
   // Load user data for friend requests
   useEffect(() => {
@@ -221,9 +332,12 @@ export const ChatDashboard = ({
 
     const loadData = async () => {
       try {
-        // Load user's rooms
+        // Load public rooms (all) and user's rooms separately
+        const publicRoomsFromApi = await RoomService.getPublicRooms();
+        setPublicRooms(publicRoomsFromApi || []);
+
+        // Load user's rooms (for DMs/private view)
         const userRooms = await RoomService.getUserRooms(user.uid);
-        setPublicRooms(userRooms.filter(room => room.type === 'public'));
         setDirectMessages(userRooms.filter(room => room.type === 'private' || room.type === 'dm'));
 
         // Load friends - using user's friends array
@@ -311,14 +425,15 @@ export const ChatDashboard = ({
   const handleCreateRoom = async (roomData: any) => {
     if (!user) return;
     try {
+      const ownerId = user.uid || (user as any).id;
       const roomId = await RoomService.createRoom({
         name: roomData.name,
         description: roomData.description,
         type: roomData.type,
         category: roomData.category,
-        owner: user.uid,
-        members: [user.uid],
-        admins: [user.uid],
+        owner: ownerId,
+        members: [ownerId],
+        admins: [ownerId],
         settings: {
           allowInvites: true,
           muteNewMembers: false,
@@ -344,26 +459,69 @@ export const ChatDashboard = ({
     timestamp: Date;
     senderName: string;
   }>>([]);
+  const socketRef = useRef<any>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [mutedUntil, setMutedUntil] = useState<number | null>(null);
+  const [randomPartnerConnected, setRandomPartnerConnected] = useState(true);
+  const [showEmojiPickerRandom, setShowEmojiPickerRandom] = useState(false);
 
   // Check user premium status (to be filled from backend user profile)
   const isPremium = false; // TODO: Implement premium status on backend user profile
 
   // Handle sending random chat messages
-  const handleSendRandomMessage = () => {
+  const handleSendRandomMessage = async () => {
     if (!randomChatMessage.trim()) return;
-    
+
+    const outgoingText = randomChatMessage.trim();
+    setRandomChatMessage("");
+
+    // If we're in a real DM/random room, send the message through the MessageService
+    const room = activeRandomRoom;
+    if (room && room.id) {
+      // local echo (temp id)
+      const tempId = `temp-${Date.now()}`;
+      const newMessage = {
+        id: tempId,
+        text: outgoingText,
+        sender: 'user' as const,
+        timestamp: new Date(),
+        senderName: user?.name || user?.displayName || 'You'
+      };
+      setRandomChatMessages(prev => [...prev, newMessage]);
+
+      // If socket connected, emit; otherwise fall back to MessageService
+      if (socketRef.current && socketConnected && (room as any).type === 'dm') {
+        try {
+          socketRef.current.emit('room:message', { roomId: room.id, senderId: user.uid, senderName: user.displayName || user.name, content: outgoingText });
+        } catch (err) {
+          console.error('socket emit failed, falling back to API:', err);
+          try {
+            await MessageService.sendMessage({ roomId: room.id, senderId: user.uid, senderName: user.displayName || user.name, content: outgoingText, type: 'text' });
+          } catch (e) { console.error('Failed to send random chat message via API:', e); }
+        }
+      } else {
+        (async () => {
+          try {
+            await MessageService.sendMessage({ roomId: room.id, senderId: user.uid, senderName: user.displayName || user.name, content: outgoingText, type: 'text' });
+          } catch (err) {
+            console.error('Failed to send random chat message:', err);
+          }
+        })();
+      }
+      return;
+    }
+
+    // Fallback to local simulated conversation when no real room exists
     const newMessage = {
       id: Date.now().toString(),
-      text: randomChatMessage,
+      text: outgoingText,
       sender: 'user' as const,
       timestamp: new Date(),
       senderName: user?.name || user?.email || 'You'
     };
-    
     setRandomChatMessages(prev => [...prev, newMessage]);
-    setRandomChatMessage("");
     
-    // Simulate stranger response after a delay
+    // Simulate stranger response after a delay for fallback
     setTimeout(() => {
       const responses = [
         "Hey! Nice to meet you! 😊",
@@ -375,9 +533,7 @@ export const ChatDashboard = ({
         "Where are you from?",
         "What do you like to do for fun?"
       ];
-      
       const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-      
       const strangerMessage = {
         id: (Date.now() + 1).toString(),
         text: randomResponse,
@@ -385,9 +541,8 @@ export const ChatDashboard = ({
         timestamp: new Date(),
         senderName: 'Stranger'
       };
-      
       setRandomChatMessages(prev => [...prev, strangerMessage]);
-    }, 1000 + Math.random() * 2000); // Random delay between 1-3 seconds
+    }, 1000 + Math.random() * 2000);
   };
 
   // Handle Enter key press for message sending
@@ -398,8 +553,21 @@ export const ChatDashboard = ({
     }
   };
 
+  const handleRandomEmojiSelect = (emoji: string) => {
+    setRandomChatMessage((prev) => prev + emoji);
+    setShowEmojiPickerRandom(false);
+  };
+
   // Reset random chat messages when starting a new chat
   const handleNewRandomChat = async () => {
+    // If we're currently in a real DM/random room, tell server to end it
+    try {
+      const room = activeRandomRoom as any;
+      if (room?.id && socketRef.current && socketConnected) {
+        socketRef.current.emit('room:end', { roomId: room.id });
+      }
+    } catch (e) {}
+
     setRandomChatMessages([]);
     if (onNextRandomChat) {
       onNextRandomChat();
@@ -428,10 +596,24 @@ export const ChatDashboard = ({
       onCloseRandomChat();
     }
     resetLocalRandomState();
+    // remove random params from URL
+    try {
+      const params = new URLSearchParams(location.search || '');
+      params.delete('random');
+      params.delete('partner');
+      const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+      navigate(newPath, { replace: true });
+    } catch (e) {
+      // ignore
+    }
   };
 
   // Handle explore rooms view
   const handleExploreRooms = () => {
+    // Navigate to the dedicated explore URL so the browser shows /explore
+    try {
+      navigate('/explore');
+    } catch (e) {}
     setIsExploreRoomsActive(true);
     setShowMobileContent(true); // Show content area on mobile
     setActiveDMRoom(null);
@@ -443,6 +625,8 @@ export const ChatDashboard = ({
     setIsExploreRoomsActive(false);
     setShowMobileContent(false); // Back to sidebar on mobile
     setDmInputMessage('');
+    // If we're on the /explore URL, navigate back to dashboard
+    try { if (location.pathname === '/explore') navigate('/dashboard'); } catch (e) {}
   };
 
   // Mobile handlers
@@ -505,6 +689,33 @@ export const ChatDashboard = ({
   const filteredDMs = directMessages.filter(dm =>
     (dm.name || '').toLowerCase().includes(normalizedSearchQuery)
   );
+
+  // Resolve DM partner profiles (avatar / displayName) for better list rendering
+  useEffect(() => {
+    let cancelled = false;
+    const loadPartners = async () => {
+      if (!directMessages || directMessages.length === 0 || !user) return;
+      const map: Record<string, AppUser> = {};
+      for (const dm of directMessages) {
+        try {
+          const members: string[] = (dm.participants || dm.members || []) as any;
+          const partnerId = members && Array.isArray(members) ? members.find(m => m !== user.uid) : undefined;
+          if (partnerId) {
+            const u = await UserService.getUserById(partnerId).catch(() => null);
+            if (u && !cancelled) map[dm.id] = u;
+          } else if ((dm as any).matchedUser) {
+            map[dm.id] = (dm as any).matchedUser;
+          }
+        } catch (e) {
+          // ignore per-room failures
+        }
+      }
+      if (!cancelled) setDmPartners(prev => ({ ...prev, ...map }));
+    };
+
+    loadPartners();
+    return () => { cancelled = true; };
+  }, [directMessages, user?.uid]);
 
   // Filter people data based on search
   const filteredFriends = friendsList.filter(friend => {
@@ -644,46 +855,57 @@ export const ChatDashboard = ({
     setRandomChatMessages([]);
     setIsRandomChatSearching(false);
     setIsFeatureDrawerOpen(false);
+    try {
+      const params = new URLSearchParams(location.search || '');
+      params.set('dm', dmRoom.id);
+      // remove random query when opening DM
+      params.delete('random');
+      params.delete('partner');
+      const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+      navigate(newPath, { replace: true });
+    } catch (e) {
+      // ignore
+    }
   };
 
   const handleCloseDMView = () => {
     setActiveDMRoom(null);
     setDmInputMessage('');
+    try {
+      const params = new URLSearchParams(location.search || '');
+      params.delete('dm');
+      const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+      navigate(newPath, { replace: true });
+    } catch (e) {}
     if (!isExploreRoomsActive && !isRandomExperienceActive) {
       setShowMobileContent(false);
     }
   };
 
   const handleMessageFriend = (friendId: string) => {
-    const friend = friendsList.find(f => f.id === friendId);
-    const friendName = friend?.name || friend?.username || 'New conversation';
-    const existingRoom = directMessages.find(dm => dm.participants?.includes(friendId) || dm.members?.includes(friendId));
-    if (existingRoom) {
-      focusDMWithRoom(existingRoom);
-      return;
-    }
+    (async () => {
+      try {
+        // Prefer creating / finding a real DM room on the server
+        const dmRoomId = await RoomService.createDMRoom(user.uid, friendId);
+        const dmRoom = await RoomService.getRoomById(dmRoomId);
+        if (dmRoom) {
+          focusDMWithRoom(dmRoom);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to create/fetch DM room from server:', err);
+      }
 
-    const syntheticRoom: ChatRoom = {
-      id: `dm-${friendId}`,
-      name: friendName,
-      description: 'Direct conversation',
-      type: 'dm',
-      owner: user?.uid || friendId,
-      createdBy: user?.uid || friendId,
-      participants: [user?.uid || 'me', friendId],
-      members: [user?.uid || 'me', friendId],
-      admins: [user?.uid || 'me'],
-      moderators: [],
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      lastActivity: new Date(),
-      messageCount: 0,
-      category: 'dm'
-    };
+      // Fallback: if we already have a local DM with that participant, focus it
+      const existingRoom = directMessages.find(dm => (dm.participants || dm.members || []).includes(friendId));
+      if (existingRoom) {
+        focusDMWithRoom(existingRoom);
+        return;
+      }
 
-    setDirectMessages(prev => [...prev, syntheticRoom]);
-    focusDMWithRoom(syntheticRoom);
+      // If nothing works, show a message to the user instead of creating a dummy
+      try { toast({ title: 'Unable to start DM', description: 'Could not create a direct message at this time. Try again later.' }); } catch (e) {}
+    })();
   };
 
   const handleSendDMMessage = () => {
@@ -730,15 +952,32 @@ export const ChatDashboard = ({
   const handleStartDM = async (username: string) => {
     if (!user) return;
     try {
-      // Find user by username
-      const users = await UserService.searchUsers(username);
-      const targetUser = users.find(u => u.username === username);
-      
+      // Try searching by username first
+      let targetUser = null;
+      try {
+        const users = await UserService.searchUsers(username);
+        targetUser = users.find(u => u.username === username) || users[0] || null;
+      } catch (err) {
+        // ignore
+      }
+
+      // If not found, try direct lookup by id (StartDMModal may pass user id)
+      if (!targetUser) {
+        try {
+          const maybe = await UserService.getUserById(username);
+          if (maybe) targetUser = maybe;
+        } catch (err) {}
+      }
+
       if (targetUser) {
         // Create or find existing DM room
         const dmRoomId = await RoomService.createDMRoom(user.uid, targetUser.id);
         const dmRoom = await RoomService.getRoomById(dmRoomId);
         if (dmRoom) {
+          // If server did not set a readable name for the DM, derive it from the partner's profile
+          if (!dmRoom.name) {
+            dmRoom.name = targetUser.displayName || targetUser.username || targetUser.name || 'Direct message';
+          }
           focusDMWithRoom(dmRoom);
         }
       }
@@ -769,54 +1008,123 @@ export const ChatDashboard = ({
     setIsFeatureDrawerOpen(false);
     
     try {
-      const onlineUsers = await UserService.getOnlineUsers();
-      const availableUsers = onlineUsers.filter(u => u.id !== user.uid);
-      
-      if (availableUsers.length === 0) {
-        setIsRandomChatSearching(false);
-        return;
+      // Initialize socket if not present
+      if (!socketRef.current) {
+        const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000').replace(/\/api$/, '');
+        try {
+          socketRef.current = io(apiBase, { transports: ['websocket'], auth: { userId: user?.uid } });
+        } catch (e) {
+          // fallback: try connecting to same origin
+          socketRef.current = io(undefined as any, { transports: ['websocket'], auth: { userId: user?.uid } });
+        }
+
+        socketRef.current.on('connect', () => setSocketConnected(true));
+        socketRef.current.on('disconnect', () => setSocketConnected(false));
+
+        socketRef.current.on('random:matched', async (payload: any) => {
+          const partnerId = payload.partnerId;
+          const roomId = payload.roomId;
+          const partner = await UserService.getUserById(partnerId).catch(() => null);
+          const dmRoom: ChatRoom = {
+            id: roomId,
+            name: `Chat with ${partner?.displayName || partner?.name || 'Stranger'}`,
+            type: 'dm',
+            owner: user?.uid || 'guest',
+            createdBy: user?.uid || 'guest',
+            participants: [user?.uid || 'guest', partnerId],
+            members: [user?.uid || 'guest', partnerId],
+            admins: [user?.uid || 'guest'],
+            moderators: [],
+            settings: {},
+            category: 'random',
+            isActive: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            lastActivity: new Date(),
+            messageCount: 0
+          } as ChatRoom & { matchedUser?: AppUser };
+          (dmRoom as any).matchedUser = partner || { id: partnerId, name: 'Stranger', displayName: 'Stranger' };
+          setLocalRandomRoom(dmRoom as ChatRoom & { matchedUser?: AppUser });
+          setLocalRandomPartner((dmRoom as any).matchedUser);
+          setRandomChatMessages([]);
+          setRandomPartnerConnected(true);
+          setIsRandomChatSearching(false);
+
+          try {
+            const params = new URLSearchParams(location.search || '');
+            params.set('random', '1');
+            params.set('partner', partnerId);
+            const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+            navigate(newPath, { replace: true });
+          } catch (e) {}
+
+          if (onNextRandomChat || onCloseRandomChat) onJoinRoom(dmRoom as ChatRoom);
+        });
+
+        socketRef.current.on('random:timeout', () => {
+          setIsRandomChatSearching(false);
+        });
+
+        socketRef.current.on('room:message', (msg: any) => {
+          const mapped = {
+            id: msg.id,
+            text: msg.content || msg.message || msg.body || '',
+            sender: msg.senderId === user?.uid ? 'user' : 'partner',
+            timestamp: new Date(msg.timestamp || Date.now()),
+            senderName: msg.senderName || (msg.senderId === user?.uid ? (user?.displayName || user?.name) : 'Stranger')
+          };
+          setRandomChatMessages(prev => {
+            if (prev.find(p => p.id === mapped.id)) return prev;
+            const idx = prev.findIndex(p => (
+              p.id?.toString().startsWith('temp-') && p.sender === mapped.sender && p.text === mapped.text
+            ));
+            if (idx !== -1) { const copy = [...prev]; copy[idx] = mapped; return copy; }
+            return [...prev, mapped];
+          });
+        });
+
+        socketRef.current.on('muted', (payload: any) => {
+          const { mutedUntil } = payload || {};
+          setMutedUntil(mutedUntil || Date.now() + 5 * 60 * 1000);
+          setRandomChatMessages(prev => [...prev, {
+            id: `sys-${Date.now()}`,
+            text: 'You have been muted for spamming. You will be able to send messages again later.',
+            sender: 'stranger',
+            timestamp: new Date(),
+            senderName: 'System'
+          }]);
+        });
+
+        socketRef.current.on('room:partner-left', (payload: any) => {
+          const { roomId, userId: leftId } = payload || {};
+          setRandomPartnerConnected(false);
+          // push a system message to inform user
+          setRandomChatMessages(prev => [...prev, {
+            id: `sys-${Date.now()}`,
+            text: 'The other user has left the chat. Click "Find New Partner" to start again.',
+            sender: 'stranger',
+            timestamp: new Date(),
+            senderName: 'System'
+          }]);
+        });
+
+        socketRef.current.on('room:ended', (payload: any) => {
+          const { roomId } = payload || {};
+          setRandomPartnerConnected(false);
+          setRandomChatMessages(prev => [...prev, {
+            id: `sys-${Date.now()}`,
+            text: 'Chat ended.',
+            sender: 'stranger',
+            timestamp: new Date(),
+            senderName: 'System'
+          }]);
+        });
       }
 
-      const randomUser = availableUsers[Math.floor(Math.random() * availableUsers.length)];
-      const friendlyName = randomUser.displayName || randomUser.name || 'Stranger';
-
-      const randomChatRoom: ChatRoom = {
-        id: `random-${Date.now()}`,
-        name: `Chat with ${friendlyName}`,
-        description: 'Private one-to-one random chat',
-        type: 'dm',
-        owner: user.uid,
-        createdBy: user.uid,
-        participants: [user.uid, randomUser.id],
-        members: [user.uid, randomUser.id],
-        admins: [user.uid],
-        moderators: [],
-        settings: {
-          matchType: 'one-to-one',
-          matchUserId: randomUser.id,
-          matchUserName: friendlyName,
-          matchUserAvatar: randomUser.photoURL || randomUser.avatar || ''
-        },
-        category: 'random',
-        isActive: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        lastActivity: new Date(),
-        messageCount: 0
-      } as ChatRoom & { matchedUser?: AppUser };
-
-      (randomChatRoom as any).matchedUser = randomUser;
-
-      setLocalRandomRoom(randomChatRoom);
-      setLocalRandomPartner(randomUser);
-      setRandomChatMessages([]);
-      setIsRandomChatSearching(false);
-
-      if (onNextRandomChat || onCloseRandomChat) {
-        onJoinRoom(randomChatRoom);
-      }
-    } catch (error) {
-      console.error('Error starting random chat:', error);
+      // emit join request for random pairing
+      socketRef.current.emit('random:join', { userId: user?.uid });
+    } catch (err) {
+      console.error('Error starting random chat (socket):', err);
       setIsRandomChatSearching(false);
     }
   };
@@ -839,6 +1147,98 @@ export const ChatDashboard = ({
       onExternalActionHandled();
     }
   }, [externalAction, onExternalActionHandled]);
+
+  // Restore DM view from URL `dm` param on mount / when location changes
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search || '');
+      const dmId = params.get('dm');
+      if (dmId && activeDMRoom?.id !== dmId) {
+        (async () => {
+          try {
+            const dmRoom = await RoomService.getRoomById(dmId);
+            if (dmRoom) {
+              // ensure readable name
+              if (!dmRoom.name) {
+                const members: string[] = (dmRoom.participants || dmRoom.members || []) as any;
+                const partnerId = members && Array.isArray(members) ? members.find(m => m !== user?.uid) : undefined;
+                if (partnerId) {
+                  const partner = await UserService.getUserById(partnerId).catch(() => null);
+                  dmRoom.name = partner?.displayName || partner?.name || 'Direct message';
+                  (dmRoom as any).matchedUser = partner || undefined;
+                }
+              }
+              focusDMWithRoom(dmRoom);
+            }
+          } catch (err) {
+            // ignore and do not throw
+          }
+        })();
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, [location.search, user?.uid]);
+
+  // Restore random chat state from URL on mount / when location changes
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search || '');
+      const isRandom = params.get('random');
+      const partnerId = params.get('partner');
+      if (isRandom && !isRandomExperienceActive) {
+        // If partner id present, try to restore that partner
+        (async () => {
+          if (partnerId) {
+            try {
+              const partner = await UserService.getUserById(partnerId);
+              if (partner) {
+                const friendlyName = partner.displayName || partner.name || 'Stranger';
+                const restoredRoom: ChatRoom = {
+                  id: `random-restored-${Date.now()}`,
+                  name: `Chat with ${friendlyName}`,
+                  description: 'Restored random chat',
+                  type: 'dm',
+                  owner: user?.uid || 'guest',
+                  createdBy: user?.uid || 'guest',
+                  participants: [user?.uid || 'guest', partner.id],
+                  members: [user?.uid || 'guest', partner.id],
+                  admins: [user?.uid || 'guest'],
+                  moderators: [],
+                  settings: {
+                    matchType: 'one-to-one',
+                    matchUserId: partner.id,
+                    matchUserName: friendlyName,
+                    matchUserAvatar: partner.photoURL || partner.avatar || ''
+                  },
+                  category: 'random',
+                  isActive: true,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                  lastActivity: new Date(),
+                  messageCount: 0
+                } as ChatRoom & { matchedUser?: AppUser };
+                (restoredRoom as any).matchedUser = partner;
+                setLocalRandomRoom(restoredRoom);
+                setLocalRandomPartner(partner);
+                setRandomChatMessages([]);
+                setShowMobileContent(true);
+              } else {
+                // fallback: start normal random chat
+                await handleRandomChat();
+              }
+            } catch (err) {
+              await handleRandomChat();
+            }
+          } else {
+            await handleRandomChat();
+          }
+        })();
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, [location.search, user]);
 
   // Loading state
   if (loading) {
@@ -885,7 +1285,7 @@ export const ChatDashboard = ({
               <Avatar className="w-8 h-8 flex-shrink-0">
                 {user.avatar && <AvatarImage src={user.avatar} alt={user.name} />}
                 <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                  {user.name.charAt(0).toUpperCase()}
+                  {(user.name || user.displayName || '').charAt(0).toUpperCase()}
                 </AvatarFallback>
               </Avatar>
               <div className="min-w-0 flex-1">
@@ -940,7 +1340,21 @@ export const ChatDashboard = ({
           <TabsContent value="public" className="flex-1 px-3 md:px-4 pb-4 space-y-0 overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-medium">Public Rooms</h3>
-              <Button size="sm" variant="outline" onClick={() => setShowCreateRoom(true)} className="text-xs">
+              <Button size="sm" variant="outline" onClick={() => {
+                if (!user || user.type === 'guest') {
+                  toast({ title: 'Registration required', description: 'Please register to create rooms.', action: (
+                    <button className="px-3 py-1 bg-primary text-white rounded" onClick={() => navigate('/settings')}>Go to Settings</button>
+                  ) });
+                  return;
+                }
+                if (!user.emailVerified) {
+                  toast({ title: 'Email verification required', description: 'Please verify your email to create rooms.', action: (
+                    <button className="px-3 py-1 bg-primary text-white rounded" onClick={async () => { if (user?.email) { await resendEmailVerification(user.email); toast({ title: 'Verification sent', description: 'Check your inbox' }); } }}>Resend verification</button>
+                  ) });
+                  return;
+                }
+                setShowCreateRoom(true);
+              }} className="text-xs">
                 <Plus className="w-4 h-4 mr-1" />
                 <span className="hidden sm:inline">Create</span>
               </Button>
@@ -961,7 +1375,7 @@ export const ChatDashboard = ({
                           <div className="flex-shrink-0">
                             <Avatar className="w-10 h-10">
                               <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                                {room.name.charAt(0).toUpperCase()}
+                                {(room.name || room.displayName || '').charAt(0).toUpperCase()}
                               </AvatarFallback>
                             </Avatar>
                           </div>
@@ -971,10 +1385,11 @@ export const ChatDashboard = ({
                                  <h4 className="font-medium text-sm truncate">{room.name}</h4>
                                  {room.type === 'private' && <Lock className="w-3 h-3 text-muted-foreground flex-shrink-0" />}
                                  {room.owner === user?.uid && <Badge variant="outline" className="text-xs flex-shrink-0">Owner</Badge>}
+                                 {room.createdBySystem && <Badge variant="outline" className="text-xs flex-shrink-0">System</Badge>}
                                </div>
                                <div className="flex items-center gap-2">
                                  <Badge variant="secondary" className="text-xs flex-shrink-0">
-                                   {room.members}
+                                   {room.memberCount ?? (Array.isArray(room.members) ? room.members.length : room.members || 0)}
                                  </Badge>
                                  {joinedPublicRooms.includes(room.id) && (
                                    <AlertDialog>
@@ -1046,22 +1461,26 @@ export const ChatDashboard = ({
                 {filteredDMs.map((dm) => (
                   <Card 
                     key={dm.id} 
-                    className="professional-card cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in"
+                    className={`professional-card cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in ${activeDMRoom?.id === dm.id ? 'ring-2 ring-primary bg-muted/20' : ''}`}
                     onClick={() => focusDMWithRoom(dm)}
+                    aria-current={activeDMRoom?.id === dm.id}
                   >
                     <CardContent className="p-3">
                       <div className="flex items-center gap-2 md:gap-3">
                         <div className="relative flex-shrink-0">
                           <Avatar className="w-10 h-10">
+                            {dmPartners[dm.id]?.avatar || dmPartners[dm.id]?.photoURL ? (
+                              <AvatarImage src={dmPartners[dm.id]?.avatar || dmPartners[dm.id]?.photoURL} alt={dmPartners[dm.id]?.displayName || dm.name} />
+                            ) : null}
                             <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                              {dm.name.charAt(0).toUpperCase()}
+                              {((dmPartners[dm.id]?.displayName || dm.name || dm.displayName) || '').charAt(0).toUpperCase()}
                             </AvatarFallback>
                           </Avatar>
                           {/* Online status is handled by the backend presence service */}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between">
-                            <h4 className="font-medium text-sm truncate">{dm.name}</h4>
+                            <h4 className="font-medium text-sm truncate">{dmPartners[dm.id]?.displayName || dm.name || dm.displayName}</h4>
                             {/* Unread count will be implemented with message service */}
                           </div>
                           {/* Last message will be fetched from message service */}
@@ -1128,8 +1547,8 @@ export const ChatDashboard = ({
                             <div className="relative flex-shrink-0">
                               <Avatar className="w-10 h-10">
                                 <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                                  {friend.name.charAt(0).toUpperCase()}
-                                </AvatarFallback>
+                                    {(friend.name || friend.displayName || '').charAt(0).toUpperCase()}
+                                  </AvatarFallback>
                               </Avatar>
                               {friend.isOnline && (
                                 <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-500 border-2 border-background rounded-full"></div>
@@ -1138,7 +1557,7 @@ export const ChatDashboard = ({
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between">
                                 <div>
-                                  <h4 className="font-medium text-sm">{friend.name}</h4>
+                                  <h4 className="font-medium text-sm">{friend.displayName || friend.name}</h4>
                                   <p className="text-xs text-muted-foreground">@{friend.username}</p>
                                 </div>
                                 <div className="flex items-center gap-1">
@@ -1203,14 +1622,14 @@ export const ChatDashboard = ({
                           <CardContent className="p-3">
                             <div className="flex items-start gap-3">
                               <Avatar className="w-10 h-10 flex-shrink-0">
-                                <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                                  {requestUser.name.charAt(0).toUpperCase()}
-                                </AvatarFallback>
+                                  <AvatarFallback className="bg-primary text-primary-foreground text-sm">
+                                    {(requestUser.name || requestUser.displayName || '').charAt(0).toUpperCase()}
+                                  </AvatarFallback>
                               </Avatar>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-start justify-between">
                                   <div className="flex-1 min-w-0">
-                                    <h4 className="font-medium text-sm">{requestUser.name}</h4>
+                                    <h4 className="font-medium text-sm">{requestUser.displayName || requestUser.name}</h4>
                                     <p className="text-xs text-muted-foreground">@{requestUser.username}</p>
                                     <span className="text-xs text-muted-foreground">
                                       Received {request.createdAt instanceof Date ? request.createdAt.toLocaleDateString() : new Date(request.createdAt).toLocaleDateString()}
@@ -1266,13 +1685,13 @@ export const ChatDashboard = ({
                           <div className="flex items-center gap-3">
                             <Avatar className="w-10 h-10 flex-shrink-0 opacity-50">
                               <AvatarFallback className="bg-muted text-muted-foreground text-sm">
-                                {blocked.name.charAt(0).toUpperCase()}
+                                {(blocked.name || blocked.displayName || '').charAt(0).toUpperCase()}
                               </AvatarFallback>
                             </Avatar>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between">
                                 <div>
-                                  <h4 className="font-medium text-sm opacity-75">{blocked.name}</h4>
+                                  <h4 className="font-medium text-sm opacity-75">{blocked.displayName || blocked.name}</h4>
                                   <p className="text-xs text-muted-foreground">@{blocked.username}</p>
                                 </div>
                                 <Button
@@ -1316,15 +1735,15 @@ export const ChatDashboard = ({
       </div>
 
       {/* Main Content Area */}
-      <div className={`${showMobileContent ? 'w-full' : 'hidden'} md:flex-1 bg-muted/5 h-screen flex md:flex overflow-hidden`}>
+      <div className={`${showMobileContent ? 'w-full' : 'hidden'} md:flex-1 bg-muted/5 h-screen flex md:flex overflow-hidden pt-16 md:pt-0 text-sm md:text-base`}>
         {/* Mobile Navigation */}
-        <div className="md:hidden fixed top-4 left-4 z-50">
+        <div className="md:hidden fixed top-3 left-3 z-50">
           {showMobileContent && !isRandomChatActive && !isExploreRoomsActive ? (
             <Button 
               variant="ghost" 
               size="sm"
               onClick={handleMobileBackToSidebar}
-              className="bg-background/90 backdrop-blur-sm shadow-md"
+              className="bg-background/90 backdrop-blur-sm shadow-md px-3 py-1 text-sm"
             >
               ← Back
             </Button>
@@ -1333,7 +1752,7 @@ export const ChatDashboard = ({
               variant="ghost" 
               size="sm"
               onClick={handleShowMobileSidebar}
-              className="bg-background/90 backdrop-blur-sm shadow-md"
+              className="bg-background/90 backdrop-blur-sm shadow-md px-3 py-1 text-sm"
             >
               ☰ Menu
             </Button>
@@ -1343,86 +1762,24 @@ export const ChatDashboard = ({
         {/* Main Content */}
         <div className="flex-1 flex items-center justify-center h-full overflow-hidden">
           {activeDMRoom ? (
-            /* Direct Message Component */
             <div className="w-full h-full flex flex-col bg-card border-l border-r pt-0 md:pt-0 max-h-screen overflow-hidden">
-              <div className="border-b bg-card px-4 py-3 flex items-center justify-between sticky top-0 z-40">
-                <div className="flex items-center gap-3">
-                  <Avatar className="w-10 h-10">
-                    <AvatarFallback className="bg-primary text-primary-foreground">
-                      {activeDMPartnerName.charAt(0).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div>
-                    <h3 className="font-semibold">{activeDMPartnerName}</h3>
-                    <p className="text-sm text-muted-foreground">Private direct message</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={handleCloseDMView}>
-                    Close
-                  </Button>
-                </div>
-              </div>
-
-              <div className="flex-1 flex flex-col overflow-hidden">
-                <ScrollArea className="flex-1 p-4 h-full overflow-y-auto">
-                  <div className="space-y-4">
-                    {activeDMConversation.length === 0 && (
-                      <div className="text-center py-8 text-muted-foreground text-sm">
-                        Say hello and start the conversation!
-                      </div>
-                    )}
-                    {activeDMConversation.map((message) => {
-                      if (message.sender === 'system') {
-                        return (
-                          <div key={message.id} className="flex justify-center">
-                            <div className="bg-muted px-3 py-1 rounded-full text-xs text-muted-foreground">
-                              {message.text}
-                            </div>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div key={message.id} className={`flex gap-2 ${message.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                          <Avatar className="w-8 h-8 flex-shrink-0">
-                            <AvatarFallback className={`text-white text-sm ${message.sender === 'user' ? 'bg-gradient-to-r from-green-500 to-blue-500' : 'bg-muted text-foreground'}`}>
-                              {message.sender === 'user' ? 'Y' : activeDMPartnerName.charAt(0).toUpperCase()}
-                            </AvatarFallback>
-                          </Avatar>
-                          <div className={`flex-1 ${message.sender === 'user' ? 'text-right' : ''}`}>
-                            <div className={`p-3 rounded-lg text-sm inline-block max-w-xs ${message.sender === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
-                              {message.text}
-                            </div>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {message.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </ScrollArea>
-
-                <div className="border-t p-4 bg-card sticky bottom-0 z-40">
-                  <div className="flex gap-2">
-                    <Input 
-                      placeholder="Write a message..."
-                      className="flex-1"
-                      value={dmInputMessage}
-                      onChange={(e) => setDmInputMessage(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSendDMMessage();
-                        }
-                      }}
-                    />
-                    <Button size="sm" className="chat-gradient text-white" onClick={handleSendDMMessage} disabled={!dmInputMessage.trim()}>
-                      <Send className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
+              <ChatRoomComponent
+                roomName={activeDMRoom.name || (dmPartners[activeDMRoom.id]?.displayName || 'Direct message')}
+                roomId={activeDMRoom.id}
+                roomType={'dm'}
+                participants={((activeDMRoom.members || activeDMRoom.participants) && (activeDMRoom.members || activeDMRoom.participants).length) || 2}
+                onBack={handleCloseDMView}
+                currentUser={{
+                  name: user?.displayName || user?.name || 'You',
+                  type: user?.isAnonymous ? 'guest' : 'email',
+                  email: user?.email,
+                  avatar: user?.avatar || user?.photoURL
+                }}
+                roomImage={dmPartners[activeDMRoom.id]?.avatar || (activeDMRoom.settings && (activeDMRoom.settings.matchUserAvatar || ''))}
+                dmPartnerId={(activeDMRoom.participants || activeDMRoom.members || [])[1] || (activeDMRoom.settings && activeDMRoom.settings.matchUserId)}
+                dmPartnerName={dmPartners[activeDMRoom.id]?.displayName || activeDMRoom.name}
+                dmPartnerAvatar={dmPartners[activeDMRoom.id]?.avatar || (activeDMRoom.settings && activeDMRoom.settings.matchUserAvatar)}
+              />
             </div>
           ) : isExploreRoomsActive ? (
             /* Explore Rooms Component */
@@ -1490,6 +1847,11 @@ export const ChatDashboard = ({
                                     <Badge variant="secondary" className="text-xs">
                                       {room.category}
                                     </Badge>
+                                    {room.createdBySystem && (
+                                      <Badge variant="outline" className="text-xs">
+                                        System
+                                      </Badge>
+                                    )}
                                     {isJoined && (
                                       <Badge variant="default" className="text-xs bg-green-500">
                                         Joined
@@ -1511,6 +1873,15 @@ export const ChatDashboard = ({
                                     variant={isJoined ? "secondary" : "default"}
                                     size="sm"
                                     className={`${isJoined ? "" : "chat-gradient text-white"} text-xs px-3 py-1 min-w-[50px]`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isJoined) {
+                                        // open the room using parent handler
+                                        try { onJoinRoom(room); } catch (err) {}
+                                      } else {
+                                        handleJoinRoom(room.id);
+                                      }
+                                    }}
                                   >
                                     {isJoined ? "Open" : "Join"}
                                   </Button>
@@ -1543,16 +1914,29 @@ export const ChatDashboard = ({
               <div className="border-b bg-card px-4 py-3 sticky top-0 z-40">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <Avatar className="w-10 h-10">
-                      {activeRandomPartner?.photoURL || activeRandomPartner?.avatar ? (
-                        <AvatarImage src={activeRandomPartner?.photoURL || activeRandomPartner?.avatar || ''} alt={randomPartnerName} />
-                      ) : null}
-                      <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
-                        {randomPartnerName.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
+                      <button
+                        onClick={async () => {
+                          try {
+                            if (activeRandomPartner?.id) {
+                              await UserService.recordProfileView(activeRandomPartner.id, user?.uid);
+                            }
+                          } catch {}
+                          navigate(`/profile?userId=${activeRandomPartner?.id || ''}`);
+                        }}
+                        title={`View ${randomPartnerName} profile`}
+                        className="rounded-full p-0"
+                      >
+                        <Avatar className="w-10 h-10 cursor-pointer">
+                          {activeRandomPartner?.photoURL || activeRandomPartner?.avatar ? (
+                            <AvatarImage src={activeRandomPartner?.photoURL || activeRandomPartner?.avatar || ''} alt={randomPartnerName} />
+                          ) : null}
+                          <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
+                            {(randomPartnerName || '').charAt(0).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                      </button>
                     <div>
-                      <h3 className="font-semibold">Talking with {randomPartnerName}</h3>
+                      <h3 className="font-semibold">Talking with {randomPartnerName || 'Stranger'}</h3>
                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
                         <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                         <span>One-to-one match · private session</span>
@@ -1595,15 +1979,33 @@ export const ChatDashboard = ({
                     {/* Dynamic Random Chat Messages */}
                     {randomChatMessages.map((message) => (
                       <div key={message.id} className={`flex gap-2 ${message.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                        <Avatar className="w-8 h-8 flex-shrink-0">
-                          <AvatarFallback className={`text-white text-sm ${
-                            message.sender === 'user' 
-                              ? 'bg-gradient-to-r from-green-500 to-blue-500' 
-                              : 'bg-gradient-to-r from-blue-500 to-purple-500'
-                          }`}>
-                            {message.sender === 'user' ? 'Y' : '?'}
-                          </AvatarFallback>
-                        </Avatar>
+                        <button
+                          onClick={async () => {
+                            try {
+                              if (message.sender === 'user') {
+                                await UserService.recordProfileView(user?.uid || '', user?.uid);
+                                navigate('/profile');
+                              } else {
+                                if (activeRandomPartner?.id) {
+                                  await UserService.recordProfileView(activeRandomPartner.id, user?.uid);
+                                }
+                                navigate(`/profile?userId=${activeRandomPartner?.id || ''}`);
+                              }
+                            } catch {}
+                          }}
+                          title={message.sender === 'user' ? 'View your profile' : `View ${randomPartnerName} profile`}
+                          className="rounded-full p-0"
+                        >
+                          <Avatar className="w-8 h-8 flex-shrink-0 cursor-pointer">
+                            <AvatarFallback className={`text-white text-sm ${
+                              message.sender === 'user' 
+                                ? 'bg-gradient-to-r from-green-500 to-blue-500' 
+                                : 'bg-gradient-to-r from-blue-500 to-purple-500'
+                            }`}>
+                              {message.sender === 'user' ? 'Y' : '?'}
+                            </AvatarFallback>
+                          </Avatar>
+                        </button>
                         <div className={`flex-1 ${message.sender === 'user' ? 'text-right' : ''}`}>
                           <div className={`flex items-center gap-2 mb-1 ${message.sender === 'user' ? 'justify-end' : ''}`}>
                             <span className="font-medium text-sm">{message.senderName}</span>
@@ -1627,7 +2029,7 @@ export const ChatDashboard = ({
                       <div className="flex gap-2">
                         <Avatar className="w-8 h-8 flex-shrink-0">
                           <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white text-sm">
-                            {randomPartnerName.charAt(0).toUpperCase()}
+                            {(randomPartnerName || '').charAt(0).toUpperCase()}
                           </AvatarFallback>
                         </Avatar>
                         <div className="flex-1">
@@ -1635,7 +2037,7 @@ export const ChatDashboard = ({
                             <span className="font-medium text-sm">{randomPartnerName}</span>
                             <span className="text-xs text-muted-foreground">just now</span>
                           </div>
-                          <div className="bg-muted p-3 rounded-lg text-sm">
+                          <div className="bg-muted p-3 rounded-lg text-sm inline-block break-words w-max max-w-[70%]">
                             Hey! How's it going? 👋
                           </div>
                         </div>
@@ -1646,7 +2048,7 @@ export const ChatDashboard = ({
                 
                 {/* Random Chat Input */}
                 <div className="border-t p-4 bg-card sticky bottom-0 z-40">
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 items-center">
                     <Input 
                       placeholder="Type a message..." 
                       className="flex-1"
@@ -1654,19 +2056,34 @@ export const ChatDashboard = ({
                       onChange={(e) => setRandomChatMessage(e.target.value)}
                       onKeyPress={handleRandomChatKeyPress}
                     />
+                    <Button variant="ghost" size="sm" onClick={() => setShowEmojiPickerRandom(prev => !prev)} title="Emoji">
+                      <Smile className="w-5 h-5" />
+                    </Button>
                     <Button 
                       size="sm" 
                       className="chat-gradient text-white"
                       onClick={handleSendRandomMessage}
-                      disabled={!randomChatMessage.trim()}
+                      disabled={!randomChatMessage.trim() || !randomPartnerConnected || (mutedUntil && mutedUntil > Date.now())}
                     >
                       <Send className="w-4 h-4" />
                     </Button>
                   </div>
+
+                  {showEmojiPickerRandom && (
+                    <div className="mt-2">
+                      <EmojiPicker onEmojiSelect={handleRandomEmojiSelect} onClose={() => setShowEmojiPickerRandom(false)} />
+                    </div>
+                  )}
+
                   <div className="flex justify-center mt-2">
-                    <span className="text-xs text-muted-foreground">
-                      Click "Next" to chat with a different person
-                    </span>
+                    {randomPartnerConnected ? (
+                      <span className="text-xs text-muted-foreground">Click "Next" to chat with a different person</span>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">Partner disconnected.</span>
+                        <Button size="sm" onClick={handleNewRandomChat} className="ml-2">Find New Partner</Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1694,7 +2111,23 @@ export const ChatDashboard = ({
                   <Compass className="w-4 h-4 mr-2" />
                   Explore Rooms
                 </Button>
-                <Button variant="outline" className="w-full" onClick={() => setShowCreateRoom(true)}>
+                <Button variant="outline" className="w-full" onClick={async () => {
+                  if (!user || user.type === 'guest') {
+                    toast({ title: 'Registration required', description: 'Please register to create rooms.', action: (
+                      <button className="px-3 py-1 bg-primary text-white rounded" onClick={() => navigate('/settings')}>Go to Settings</button>
+                    ) });
+                    return;
+                  }
+
+                  if (!user.emailVerified) {
+                    toast({ title: 'Email verification required', description: 'Please verify your email to create rooms.', action: (
+                      <button className="px-3 py-1 bg-primary text-white rounded" onClick={async () => { if (user?.email) { await resendEmailVerification(user.email); toast({ title: 'Verification sent', description: 'Check your inbox' }); } }}>Resend verification</button>
+                    ) });
+                    return;
+                  }
+
+                  setShowCreateRoom(true);
+                }}>
                   Create New Room
                 </Button>
               </div>

@@ -109,12 +109,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   const signUp = async (email: string, password: string, displayName: string, requireEmailVerification = false) => {
+    // Include auth token so guest -> registered conversion can occur
     const result = await apiClient.post<{ user: AuthApiUser; token?: string }>('/auth/signup', {
       email,
       password,
       displayName,
       requireEmailVerification
-    }, { auth: false });
+    });
 
     if (result.token && !requireEmailVerification) {
       setAuthToken(result.token);
@@ -175,7 +176,24 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const updateUserProfile = async (data: Partial<AuthUser>) => {
     if (!state.user) return;
-    const updated = await apiClient.patch<AuthApiUser>(`/users/${state.user.id}`, data);
+    const updatedRaw = await apiClient.patch<any>(`/users/${state.user.id}`, data);
+    // Normalize Mongo doc (_id) to API shape expected by normalizeUser
+    const updated: AuthApiUser = {
+      id: updatedRaw.id || updatedRaw._id || String(updatedRaw.guestId || state.user.id),
+      uid: updatedRaw.uid || updatedRaw.id || updatedRaw._id || String(updatedRaw.guestId || state.user.id),
+      email: updatedRaw.email || state.user.email,
+      name: updatedRaw.name || updatedRaw.displayName || state.user.name,
+      displayName: updatedRaw.displayName || updatedRaw.name || state.user.displayName,
+      userType: updatedRaw.userType || state.user.userType,
+      avatar: updatedRaw.avatar || updatedRaw.photoURL || state.user.avatar,
+      bio: updatedRaw.bio || state.user.bio,
+      gender: updatedRaw.gender || state.user.gender,
+      location: updatedRaw.location || state.user.location,
+      dob: updatedRaw.dob || state.user.dob,
+      settings: updatedRaw.settings || state.user?.settings,
+      createdAt: updatedRaw.createdAt || state.user.createdAt
+    } as AuthApiUser;
+
     setState(prev => ({ ...prev, user: normalizeUser(updated) }));
   };
 

@@ -71,6 +71,7 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
   // Username availability checking
   const [checkingUsername, setCheckingUsername] = useState(false);
   const [usernameCheckTimer, setUsernameCheckTimer] = useState<NodeJS.Timeout | null>(null);
+  const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
 
   // Validation Functions
   const validateUsername = (username: string) => {
@@ -139,15 +140,16 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
         // Username already exists
         setValidationErrors(prev => ({ ...prev, guestName: 'Username already taken. Please choose another one.' }));
         setFieldTouched(prev => ({ ...prev, guestName: true }));
+        setUsernameAvailable(false);
       } else if (response.ok && data.available) {
         // Username is available - clear any previous errors
-        if (validationErrors.guestName === 'Username already taken. Please choose another one.') {
-          setValidationErrors(prev => ({ ...prev, guestName: '' }));
-        }
+        setValidationErrors(prev => ({ ...prev, guestName: '' }));
+        setUsernameAvailable(true);
       } else if (!response.ok) {
         // Other errors (400, etc)
         setValidationErrors(prev => ({ ...prev, guestName: data.message || 'Error checking username' }));
         setFieldTouched(prev => ({ ...prev, guestName: true }));
+        setUsernameAvailable(false);
       }
     } catch (error) {
       // Network error - backend might not be running
@@ -162,8 +164,8 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
     if (!name.trim()) {
       return 'Name is required';
     }
-    if (name.length < 2) {
-      return 'Name must be at least 2 characters';
+    if (name.length < 3) {
+      return 'Name must be at least 3 characters';
     }
     if (name.length > 15) {
       return 'Name must be less than 15 characters';
@@ -216,6 +218,8 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
         // Auto-replace spaces with underscores
         const cleanedValue = value.replace(/\s+/g, '_');
         setGuestName(cleanedValue);
+        // Reset availability while typing
+        setUsernameAvailable(null);
         // Clear existing timer
         if (usernameCheckTimer) {
           clearTimeout(usernameCheckTimer);
@@ -482,9 +486,15 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
         variant: "default"
       });
     } catch (error: any) {
+      const msg = error?.message || error?.toString() || 'Something went wrong. Please try again.';
+      // If backend reports email/user exists, show inline validation on email field
+      if (error?.status === 409 || (typeof msg === 'string' && /user exists|email already/i.test(msg))) {
+        setValidationErrors(prev => ({ ...prev, email: 'Email already in use. Try logging in or use a different email.' }));
+        setFieldTouched(prev => ({ ...prev, email: true }));
+      }
       toast({
         title: "Signup failed",
-        description: error.message || "Something went wrong. Please try again.",
+        description: msg,
         variant: "destructive"
       });
       incrementAttempts();
@@ -620,6 +630,11 @@ export const AuthModal = ({ onAuth, onBack, initialUsername, initialIsSignUp, mi
                   {checkingUsername && (
                     <div className="absolute right-3 top-1/2 -translate-y-1/2">
                       <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full"></div>
+                    </div>
+                  )}
+                  {!checkingUsername && usernameAvailable && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500">
+                      <Check className="w-4 h-4" />
                     </div>
                   )}
                 </div>

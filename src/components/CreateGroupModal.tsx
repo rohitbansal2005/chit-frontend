@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { uploadToCloudinary } from "@/lib/cloudinary";
 import { X, Users, Lock, Globe, Crown, Camera, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,40 +48,28 @@ export const CreateGroupModal = ({ onClose, onCreateGroup, isPremium = false }: 
     'art', 'cooking', 'travel', 'education', 'business', 'other'
   ];
 
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     if (!file.type.startsWith('image/')) {
-      toast({
-        title: "Invalid file type",
-        description: "Please select an image file",
-        variant: "destructive"
-      });
+      toast({ title: 'Invalid file type', description: 'Please select an image file', variant: 'destructive' });
       return;
     }
-
-    // Validate file size (max 1MB)
     if (file.size > 1 * 1024 * 1024) {
-      toast({
-        title: "File too large",
-        description: "Please select an image smaller than 1MB",
-        variant: "destructive"
-      });
+      toast({ title: 'File too large', description: 'Please select an image smaller than 1MB', variant: 'destructive' });
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setFormData(prev => ({ ...prev, image: result }));
-      toast({
-        title: "Group logo uploaded",
-        description: "Logo has been set for the group"
-      });
-    };
-    reader.readAsDataURL(file);
+    try {
+      toast({ title: 'Uploading group logo...' });
+      const res = await uploadToCloudinary(file, 'chitz/groups/logos');
+      setFormData(prev => ({ ...prev, image: res.url }));
+      toast({ title: 'Group logo uploaded', description: 'Logo has been set for the group' });
+    } catch (err) {
+      console.error('Group logo upload failed', err);
+      toast({ title: 'Upload failed', description: 'Could not upload group logo', variant: 'destructive' });
+    }
   };
 
   const triggerImageUpload = () => {

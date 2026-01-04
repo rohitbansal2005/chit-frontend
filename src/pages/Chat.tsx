@@ -1,12 +1,37 @@
 import { useAuth } from '@/contexts/AuthContext-new';
 import { ChatRoom } from '@/components/ChatRoom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { RoomService } from '@/lib/app-data';
+
+interface RoomInfo {
+  id: string;
+  name?: string;
+  type?: string;
+  participants?: string[];
+}
 
 const Chat = () => {
   const { currentUser, loading } = useAuth();
   const navigate = useNavigate();
   const { roomId } = useParams<{ roomId: string }>();
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
+
+  // Load room info (hook must run on every render to keep hooks count stable)
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      if (!roomId) return;
+      try {
+        const info = await RoomService.getRoomById(roomId);
+        if (mounted) setRoomInfo(info || null);
+      } catch (err) {
+        console.warn('Could not load room info', err);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [roomId]);
 
   useEffect(() => {
     if (!loading && !currentUser) {
@@ -40,12 +65,14 @@ const Chat = () => {
     type: currentUser.userType === 'guest' ? 'guest' as const : 'email' as const
   };
 
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <ChatRoom 
-        roomName={`Room ${roomId}`}
-        roomType="public"
-        participants={1}
+        roomId={roomId}
+        roomName={roomInfo?.name || `Room ${roomId}`}
+        roomType={(roomInfo?.type as any) || 'public'}
+        participants={roomInfo?.participants?.length || 1}
         currentUser={mappedUser}
         onBack={handleBackToDashboard}
       />

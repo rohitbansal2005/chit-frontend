@@ -140,10 +140,12 @@ export const MessageActions = ({
         ) : (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => handleAction(() => onAddFriend(userId))}>
-              <UserPlus className="w-4 h-4 mr-2" />
-              Add Friend
-            </DropdownMenuItem>
+            {roomType !== 'dm' && (
+              <DropdownMenuItem onClick={() => handleAction(() => onAddFriend(userId))}>
+                <UserPlus className="w-4 h-4 mr-2" />
+                Add Friend
+              </DropdownMenuItem>
+            )}
             {/* Hide Send DM option in DM rooms since you're already in a DM */}
             {roomType !== 'dm' && (
               <DropdownMenuItem onClick={() => handleAction(() => onStartDM(userId))}>

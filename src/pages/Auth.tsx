@@ -61,6 +61,9 @@ const Auth = () => {
           // Stay on auth to show verification instructions
           return;
         }
+        // After a successful signup, send user to Settings to complete profile
+        navigate('/settings');
+        return;
       } else if (data?.isResend) {
         await resendEmailVerification(data.email);
         return;
@@ -71,6 +74,7 @@ const Auth = () => {
       navigate('/dashboard');
     } catch (error) {
       console.error('Authentication error:', error);
+      throw error;
     }
   };
 

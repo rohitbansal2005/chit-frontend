@@ -123,12 +123,30 @@ export class UserService {
     }
   }
 
+  // Record that `viewerId` viewed `targetUserId`'s profile
+  static async recordProfileView(targetUserId: string, viewerId?: string): Promise<number | null> {
+    try {
+      const resp = await apiClient.post<{ profileViews: number }>(`/users/${targetUserId}/view`, { viewerId });
+      return resp.profileViews ?? null;
+    } catch (err) {
+      return null;
+    }
+  }
+
   static async blockUser(userId: string, blockedUserId: string) {
     await apiClient.post(`/users/${userId}/block`, { blockedUserId });
   }
 
   static async unblockUser(userId: string, unblockedUserId: string) {
     await apiClient.post(`/users/${userId}/unblock`, { unblockedUserId });
+  }
+  
+  static async reportUser(reporterId: string, targetId: string, reason?: string) {
+    try {
+      return await apiClient.post('/reports', { reporterId, targetId, reason });
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -191,6 +209,16 @@ export class MessageService {
     if (!roomId) throw new Error('roomId is required');
     const message = await apiClient.post<ChatMessage>(`/rooms/${roomId}/messages`, payload);
     return message.id;
+  }
+
+  // Record chat activity for a user (used to increment message counters / streaks)
+  static async recordActivityMessage(userId: string, count: number = 1) {
+    try {
+      const resp = await apiClient.post(`/users/${userId}/activity/message`, { count });
+      return resp;
+    } catch (err) {
+      return null;
+    }
   }
 
   static async getRoomMessages(roomId: string, limitCount: number = 50): Promise<ChatMessage[]> {

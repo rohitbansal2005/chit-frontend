@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from "react";
+import { useAuth } from '@/contexts/AuthContext-new';
+import { ToastAction } from '@/components/ui/toast';
 import { useNavigate } from 'react-router-dom';
+// import { useToast } from '@/hooks/use-toast'; // Duplicate import removed
 import { X, Users, Lock, Globe, Crown, Camera, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { uploadToCloudinary } from "@/lib/cloudinary";
+import { RoomService } from '@/lib/app-data';
 import { useToast } from "@/hooks/use-toast";
 
 const CreateRoom = ({ isPremium = false }: { isPremium?: boolean }) => {
@@ -23,6 +28,7 @@ const CreateRoom = ({ isPremium = false }: { isPremium?: boolean }) => {
   const [customCategory, setCustomCategory] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+  const { user, resendEmailVerification } = useAuth();
 
   useEffect(() => {
     const currentMax = parseInt(formData.maxMembers);
@@ -37,7 +43,7 @@ const CreateRoom = ({ isPremium = false }: { isPremium?: boolean }) => {
     'art', 'cooking', 'travel', 'education', 'business', 'other'
   ];
 
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith('image/')) {
@@ -48,19 +54,34 @@ const CreateRoom = ({ isPremium = false }: { isPremium?: boolean }) => {
       toast({ title: "File too large", description: "Please select an image smaller than 1MB", variant: "destructive" });
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setFormData(prev => ({ ...prev, image: result }));
+    try {
+      toast({ title: "Uploading room logo..." });
+      const res = await uploadToCloudinary(file, 'chitz/rooms');
+      setFormData(prev => ({ ...prev, image: res.url }));
       toast({ title: "Group logo uploaded", description: "Logo has been set for the group" });
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('Room logo upload failed', err);
+      toast({ title: "Upload failed", description: "Could not upload logo. Try again.", variant: "destructive" });
+    }
   };
 
   const triggerImageUpload = () => fileInputRef.current?.click();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Require registered + email-verified users to create rooms
+    if (!user || user.type === 'guest') {
+      toast({ title: 'Registration required', description: 'Please register before creating a room.', action: (
+        <button className="px-3 py-1 bg-primary text-white rounded" onClick={() => navigate('/settings')}>Go to Settings</button>
+      ) });
+      return;
+    }
+    if (!user.emailVerified) {
+      toast({ title: 'Email verification required', description: 'Please verify your email before creating a room.', action: (
+        <button className="px-3 py-1 bg-primary text-white rounded" onClick={async () => { if (user?.email) { await resendEmailVerification(user.email); toast({ title: 'Verification sent', description: 'Check your inbox' }); } }}>Resend verification</button>
+      ) });
+      return;
+    }
     if (!formData.name.trim()) return;
     const maxMembersNum = parseInt(formData.maxMembers);
     if (!isPremium && maxMembersNum > 10000) {
@@ -81,9 +102,23 @@ const CreateRoom = ({ isPremium = false }: { isPremium?: boolean }) => {
       image: formData.image
     };
 
-    toast({ title: 'Group created', description: `Created ${newGroup.name}` });
-    // navigate back or to new group's page
-    navigate('/chat');
+    try {
+      const roomId = await RoomService.createRoom({
+        name: newGroup.name,
+        description: newGroup.description,
+        category: newGroup.category,
+        type: newGroup.type,
+        participants: [user?.id || user?.uid || ''],
+        members: [user?.id || user?.uid || ''],
+        settings: {},
+        roomImage: newGroup.image
+      });
+      toast({ title: 'Group created', description: `Created ${newGroup.name}` });
+      navigate(`/chat/${roomId}`);
+    } catch (err) {
+      console.error('Failed to create room', err);
+      toast({ title: 'Creation failed', description: 'Could not create room. Try again later.', variant: 'destructive' });
+    }
   };
 
   return (

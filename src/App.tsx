@@ -15,6 +15,7 @@ import ForgotPassword from "./pages/ForgotPassword";
 import NotFound from "./pages/NotFound";
 import FeatureHub from "./pages/FeatureHub";
 import AccountSettings from "./pages/AccountSettings";
+import CreateRoom from "./pages/CreateRoom";
 import Support from "./pages/Support";
 
 const queryClient = new QueryClient();
@@ -37,7 +38,9 @@ const App = () => {
               <Route path="/auth" element={<Auth />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/explore" element={<Dashboard />} />
               <Route path="/settings" element={<AccountSettings />} />
+              <Route path="/create-room" element={<CreateRoom />} />
               <Route path="/support" element={<Support />} />
               <Route path="/feature-hub" element={<FeatureHub />} />
               <Route path="/chat/:roomId" element={<Chat />} />

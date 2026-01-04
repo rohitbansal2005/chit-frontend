@@ -21,9 +21,11 @@ const convertAuthUserToUser = (authUser: AuthUser) => ({
   email: authUser.email,
   avatar: authUser.avatar,
   bio: authUser.bio || '',
-  age: undefined, // Not available in API user
-  gender: undefined, // Not available in API user
-  location: undefined, // Not available in API user
+  age: authUser.dob ? Math.max(0, new Date().getFullYear() - new Date(authUser.dob).getFullYear()) : undefined,
+  gender: authUser.gender || undefined,
+  location: authUser.location || undefined,
+  dob: authUser.dob ? new Date(authUser.dob).toISOString() : undefined,
+  settings: (authUser as any).settings || undefined,
   badges: [], // Default empty array
   joinedDate: authUser.createdAt ? authUser.createdAt.toISOString() : undefined,
   premiumStatus: authUser.premiumStatus || 'free' as 'free' | 'monthly' | 'yearly'
@@ -37,10 +39,18 @@ const Index = () => {
 
   const handleUpdateUser = async (updatedUser: any) => {
     try {
+      // Send full updated user payload so all profile fields persist
       await updateProfile({
         name: updatedUser.name,
         avatar: updatedUser.avatar,
-        bio: updatedUser.bio
+        bio: updatedUser.bio,
+        age: updatedUser.age,
+        gender: updatedUser.gender,
+        location: updatedUser.location,
+        lastUsernameChange: updatedUser.lastUsernameChange,
+        // include settings if present
+        settings: (updatedUser as any).settings || undefined,
+        dob: (updatedUser as any).dob
       });
     } catch (error) {
       console.error('Failed to update user:', error);

@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { X, Shield, Mail, Lock, User as UserIcon, Calendar as CalendarIcon } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { uploadToCloudinary } from "@/lib/cloudinary";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
@@ -288,14 +289,29 @@ export const AccountSettingsContent = ({
     }
   };
 
-  const handleProfileImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProfileImageChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setProfileForm((prev) => ({ ...prev, photoURL: reader.result as string }));
-    };
-    reader.readAsDataURL(file);
+
+    // Basic validations
+    if (!file.type.startsWith('image/')) {
+      toast({ title: 'Invalid file type', description: 'Please select an image file', variant: 'destructive' });
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast({ title: 'File too large', description: 'Please select an image smaller than 2MB', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      toast({ title: 'Uploading profile photo...' });
+      const res = await uploadToCloudinary(file, 'chitz/avatars');
+      setProfileForm((prev) => ({ ...prev, photoURL: res.url }));
+      toast({ title: 'Profile photo uploaded' });
+    } catch (err) {
+      console.error('Profile upload failed', err);
+      toast({ title: 'Upload failed', description: 'Could not upload profile photo', variant: 'destructive' });
+    }
   };
 
   const triggerImagePicker = () => {

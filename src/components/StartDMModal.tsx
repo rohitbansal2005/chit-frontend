@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Search, MessageCircle, UserPlus } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+import { UserService, AppUser } from '@/lib/app-data';
 
 interface StartDMModalProps {
   isOpen: boolean;
@@ -15,6 +16,29 @@ interface StartDMModalProps {
 export const StartDMModal = ({ isOpen, onOpenChange, onStartDM }: StartDMModalProps) => {
   const [username, setUsername] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [results, setResults] = useState<AppUser[]>([]);
+
+  useEffect(() => {
+    if (!username || username.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const users = await UserService.searchUsers(username.trim());
+        if (!cancelled) setResults(users || []);
+      } catch (err) {
+        console.warn('User search failed', err);
+      } finally {
+        if (!cancelled) setIsSearching(false);
+      }
+    }, 300);
+
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [username]);
 
   const handleStartDM = async () => {
     if (!username.trim()) {
@@ -108,6 +132,32 @@ export const StartDMModal = ({ isOpen, onOpenChange, onStartDM }: StartDMModalPr
                 disabled={isSearching}
               />
             </div>
+            {/* Search results */}
+            {results.length > 0 && (
+              <div className="mt-2 max-h-48 overflow-auto border rounded bg-popover">
+                {results.map((u) => (
+                  <button
+                    key={u.id}
+                    className="w-full text-left px-3 py-2 hover:bg-muted/60"
+                    onClick={() => {
+                      // prefer passing canonical user id to starter
+                      setUsername(u.username || u.displayName || u.name || '');
+                      onStartDM(u.id);
+                      onOpenChange(false);
+                      toast({ title: 'DM Started', description: `Started a conversation with ${u.displayName || uname}` });
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-sm">{(u.displayName || u.name || '').charAt(0).toUpperCase()}</div>
+                      <div className="flex-1">
+                        <div className="font-medium text-sm">{u.displayName || u.name || u.username}</div>
+                        <div className="text-xs text-muted-foreground">{u.username ? `@${u.username}` : ''}</div>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
             <p className="text-xs text-muted-foreground">
               Enter the username of the person you want to message
             </p>

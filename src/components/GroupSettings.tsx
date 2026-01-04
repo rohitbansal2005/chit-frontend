@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator
 } from "@/components/ui/dropdown-menu";
+import { uploadToCloudinary } from "@/lib/cloudinary";
 
 interface GroupMember {
   id: string;
@@ -304,41 +305,49 @@ export const GroupSettingsModal = ({
     }
   };
 
-  const handleLogoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      // Check file size (max 1MB)
-      if (file.size > 1 * 1024 * 1024) {
-        toast({
-          title: "File too large",
-          description: "Please select an image smaller than 1MB",
-          variant: "destructive"
-        });
-        return;
-      }
+    if (!file) return;
 
-      // Check file type
-      if (!file.type.startsWith('image/')) {
-        toast({
-          title: "Invalid file type",
-          description: "Please select an image file",
-          variant: "destructive"
-        });
-        return;
-      }
+    if (file.size > 1 * 1024 * 1024) {
+      toast({ title: 'File too large', description: 'Please select an image smaller than 1MB', variant: 'destructive' });
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      toast({ title: 'Invalid file type', description: 'Please select an image file', variant: 'destructive' });
+      return;
+    }
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const imageUrl = e.target?.result as string;
-        setGroupLogo(imageUrl);
-        handleSettingsUpdate('groupIcon', imageUrl);
-        onUpdateGroupLogo?.(imageUrl);
-        toast({
-          title: "Group logo updated",
-          description: "Group logo has been successfully changed"
-        });
-      };
-      reader.readAsDataURL(file);
+    try {
+      toast({ title: 'Uploading group logo...' });
+      const res = await uploadToCloudinary(file, 'chitz/groups/logos');
+      const imageUrl = res.url;
+      setGroupLogo(imageUrl);
+      handleSettingsUpdate('groupIcon', imageUrl);
+      onUpdateGroupLogo?.(imageUrl);
+      toast({ title: 'Group logo updated', description: 'Group logo has been successfully changed' });
+    } catch (err) {
+      console.error('Group logo upload failed', err);
+      toast({ title: 'Upload failed', description: 'Could not upload group logo', variant: 'destructive' });
+    }
+  };
+
+  const handleWallpaperUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast({ title: 'Invalid file type', description: 'Please select an image file', variant: 'destructive' });
+      return;
+    }
+    try {
+      toast({ title: 'Uploading wallpaper...' });
+      const res = await uploadToCloudinary(file, 'chitz/groups/wallpapers');
+      setSelectedWallpaper(res.url);
+      handleSettingsUpdate('groupWallpaper', res.url);
+      toast({ title: 'Wallpaper updated', description: 'Group wallpaper has been changed' });
+    } catch (err) {
+      console.error('Wallpaper upload failed', err);
+      toast({ title: 'Upload failed', description: 'Could not upload wallpaper', variant: 'destructive' });
     }
   };
 
@@ -616,6 +625,15 @@ export const GroupSettingsModal = ({
                           Remove Wallpaper
                         </Button>
                       )}
+                      <div className="mt-2">
+                        <input id="wallpaper-upload" type="file" accept="image/*" onChange={handleWallpaperUpload} className="hidden" />
+                        <div className="flex gap-2 mt-2">
+                          <Button size="sm" variant="outline" onClick={() => document.getElementById('wallpaper-upload')?.click()}>
+                            <Upload className="w-4 h-4 mr-2" />
+                            Upload Wallpaper
+                          </Button>
+                        </div>
+                      </div>
                       
                       <p className="text-xs text-muted-foreground">
                         Select a wallpaper to customize your group chat background

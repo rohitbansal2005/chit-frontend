@@ -94,7 +94,16 @@ const categories = [
   }
 ];
 
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/contexts/AuthContext-new';
+import { useToast } from '@/hooks/use-toast';
+import { ToastAction } from '@/components/ui/toast';
+
 export const ChatCategories = () => {
+  const navigate = useNavigate();
+  const { user, resendEmailVerification } = useAuth();
+  const { toast } = useToast();
+
   return (
     <section className="py-20 px-6">
       <div className="max-w-7xl mx-auto">
@@ -150,6 +159,21 @@ export const ChatCategories = () => {
                   <Button 
                     variant="chat" 
                     className="w-full group-hover:bg-chat-primary group-hover:text-white"
+                    onClick={() => {
+                      if (!user || user.type === 'guest') {
+                        toast({ title: 'Registration required', description: 'Register to create rooms.', action: (
+                          <button className="px-3 py-1 bg-primary text-white rounded" onClick={() => navigate('/settings')}>Go to Settings</button>
+                        ) });
+                        return;
+                      }
+                      if (!user.emailVerified) {
+                        toast({ title: 'Email verification required', description: 'Please verify your email to create rooms.', action: (
+                          <button className="px-3 py-1 bg-primary text-white rounded" onClick={async () => { if (user?.email) { await resendEmailVerification(user.email); toast({ title: 'Verification sent', description: 'Check your inbox' }); } }}>Resend verification</button>
+                        ) });
+                        return;
+                      }
+                      navigate('/create-room');
+                    }}
                   >
                     <MessageCircle className="w-4 h-4 mr-2" />
                     Join Now
@@ -172,7 +196,19 @@ export const ChatCategories = () => {
             <Button variant="outline" className="border-chat-secondary text-chat-secondary hover:bg-chat-secondary hover:text-white">
               Most Popular
             </Button>
-            <Button variant="outline" className="border-chat-accent text-chat-accent hover:bg-chat-accent hover:text-background">
+            <Button
+              variant="outline"
+              className="border-chat-accent text-chat-accent hover:bg-chat-accent hover:text-background"
+              onClick={() => {
+                if (!user || user.type === 'guest' || !user.emailVerified) {
+                  toast({ title: 'Registration required', description: 'Register and verify your email to create rooms.', action: (
+                    <button className="px-3 py-1 bg-primary text-white rounded" onClick={() => navigate('/settings')}>Go to Settings</button>
+                  ) });
+                  return;
+                }
+                navigate('/create-room');
+              }}
+            >
               Create Room
             </Button>
           </div>

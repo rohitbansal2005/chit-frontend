@@ -23,6 +23,13 @@ const Dashboard = () => {
     }
   }, [location, navigate]);
 
+  useEffect(() => {
+    // Support direct /explore URL to open the Explore view
+    if (location.pathname === '/explore') {
+      setExternalAction('explore-rooms');
+    }
+  }, [location.pathname]);
+
   const handleJoinRoom = (room: any) => {
     // Handle both roomId string and room object
     const roomId = typeof room === 'string' ? room : room.id;

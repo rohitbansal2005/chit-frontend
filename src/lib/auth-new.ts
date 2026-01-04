@@ -11,6 +11,12 @@ export interface AuthUser {
   userType?: 'guest' | 'registered' | 'premium';
   avatar?: string;
   bio?: string;
+  photoURL?: string;
+  gender?: string;
+  location?: string;
+  dob?: string;
+  age?: number;
+  settings?: any;
   isOnline: boolean;
   isAnonymous?: boolean;
   emailVerified?: boolean;
@@ -35,6 +41,10 @@ export const mapApiUserToAuthUser = (apiUser: Partial<AuthUser> & { id?: string;
     userType: (apiUser.type as AuthUser['type']) || 'registered',
     avatar: apiUser.avatar || customData?.photoURL || '',
     bio: apiUser.bio || customData?.bio,
+    gender: (apiUser as any).gender || (customData as any)?.gender,
+    location: (apiUser as any).location || (customData as any)?.location,
+    dob: (apiUser as any).dob || (customData as any)?.dob,
+    settings: (apiUser as any).settings || (customData as any)?.settings,
     dob: (apiUser as any).dob || (customData as any)?.dob,
     isOnline: apiUser.isOnline ?? customData?.isOnline ?? false,
     isAnonymous: apiUser.isAnonymous ?? false,

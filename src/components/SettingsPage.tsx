@@ -30,6 +30,7 @@ import {
   ChevronsUpDown
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { uploadToCloudinary } from "@/lib/cloudinary";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -231,47 +232,36 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
     language: 'english' as 'english' | 'hindi' | 'spanish' | 'french',
   });
 
-  const handleImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     if (!file.type.startsWith('image/')) {
-      toast({
-        title: "Invalid file type",
-        description: "Please select an image file",
-        variant: "destructive"
-      });
+      toast({ title: "Invalid file type", description: "Please select an image file", variant: "destructive" });
       return;
     }
 
-    // Validate file size (max 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      toast({
-        title: "File too large", 
-        description: "Please select an image smaller than 5MB",
-        variant: "destructive"
-      });
+      toast({ title: "File too large", description: "Please select an image smaller than 5MB", variant: "destructive" });
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setProfileImage(result);
-      toast({
-        title: "Profile image updated",
-        description: "Your profile image has been changed"
-      });
-    };
-    reader.readAsDataURL(file);
+    try {
+      toast({ title: "Uploading image..." });
+      const res = await uploadToCloudinary(file, 'chitz/avatars');
+      setProfileImage(res.url);
+      toast({ title: "Profile image uploaded", description: "Your profile image has been updated" });
+    } catch (err) {
+      console.error('Upload failed', err);
+      toast({ title: "Upload failed", description: "Could not upload image. Try again.", variant: "destructive" });
+    }
   };
 
   const triggerImageUpload = () => {
     fileInputRef.current?.click();
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     // Validate bio length
     if (profileData.bio.length > 1000) {
       toast({
@@ -308,18 +298,26 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
       lastUsernameChange: usernameChanged ? new Date().toISOString() : user.lastUsernameChange,
     };
 
-    onUpdateUser(updatedUser);
-    setIsEditingProfile(false);
-    
-    if (usernameChanged) {
+    try {
+      await onUpdateUser(updatedUser);
+      setIsEditingProfile(false);
+      if (usernameChanged) {
+        toast({
+          title: "Username updated successfully",
+          description: "Your username has been changed. Next change allowed after 30 days."
+        });
+      } else {
+        toast({
+          title: "Profile updated",
+          description: "Your profile has been saved successfully"
+        });
+      }
+    } catch (err) {
+      console.error('Failed to save profile', err);
       toast({
-        title: "Username updated successfully",
-        description: "Your username has been changed. Next change allowed after 30 days."
-      });
-    } else {
-      toast({
-        title: "Profile updated",
-        description: "Your profile has been saved successfully"
+        title: 'Failed to save profile',
+        description: err?.message || 'Please try again later',
+        variant: 'destructive'
       });
     }
   };
@@ -712,7 +710,7 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
                     <Input
                       id="age"
                       type="number"
-                      value={profileData.age}
+                      value={profileData.age ?? ''}
                       onChange={(e) => setProfileData(prev => ({ ...prev, age: e.target.value }))}
                       disabled={!isEditingProfile}
                     />
@@ -720,7 +718,7 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
                   <div>
                     <Label htmlFor="gender">Gender</Label>
                     <Select
-                      value={profileData.gender}
+                      value={profileData.gender || ''}
                       onValueChange={(value) => setProfileData(prev => ({ ...prev, gender: value }))}
                       disabled={!isEditingProfile}
                     >
@@ -1212,7 +1210,7 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
                 <div>
                   <Label>Profile Visibility</Label>
                   <Select
-                    value={settings.privacy.profileVisibility}
+                    value={settings.privacy.profileVisibility || ''}
                     onValueChange={(value) => handleSettingChange('privacy', 'profileVisibility', value)}
                   >
                     <SelectTrigger className="mt-2">

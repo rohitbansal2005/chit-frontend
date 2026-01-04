@@ -13,7 +13,8 @@ import {
   Flag, 
   Eye, 
   UserPlus,
-  MoreVertical 
+  MoreVertical,
+  Trash2
 } from "lucide-react";
 
 interface UserActionsMenuProps {
@@ -25,6 +26,7 @@ interface UserActionsMenuProps {
   onAddFriend: (userId: string) => void;
   onBlockUser: (userId: string) => void;
   onReportUser: (userId: string, userName: string) => void;
+  onDeleteChat?: (userId: string) => void;
   roomType?: 'public' | 'private' | 'dm';
 }
 
@@ -37,6 +39,7 @@ export const UserActionsMenu = ({
   onAddFriend,
   onBlockUser,
   onReportUser,
+  onDeleteChat,
   roomType = 'public',
 }: UserActionsMenuProps) => {
   // Don't show menu for current user
@@ -91,6 +94,15 @@ export const UserActionsMenu = ({
           <UserMinus className="w-4 h-4 mr-2" />
           Block User
         </DropdownMenuItem>
+        {onDeleteChat && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onDeleteChat(userId)} className="text-destructive">
+              <Trash2 className="w-4 h-4 mr-2" />
+              Delete Chat
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
