@@ -11,9 +11,10 @@ interface StartDMModalProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onStartDM: (username: string) => void;
+  excludeUserId?: string;
 }
 
-export const StartDMModal = ({ isOpen, onOpenChange, onStartDM }: StartDMModalProps) => {
+export const StartDMModal = ({ isOpen, onOpenChange, onStartDM, excludeUserId }: StartDMModalProps) => {
   const [username, setUsername] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<AppUser[]>([]);
@@ -29,7 +30,8 @@ export const StartDMModal = ({ isOpen, onOpenChange, onStartDM }: StartDMModalPr
       setIsSearching(true);
       try {
         const users = await UserService.searchUsers(username.trim());
-        if (!cancelled) setResults(users || []);
+        const filtered = (users || []).filter((u) => !excludeUserId || u.id !== excludeUserId);
+        if (!cancelled) setResults(filtered);
       } catch (err) {
         console.warn('User search failed', err);
       } finally {
@@ -141,10 +143,11 @@ export const StartDMModal = ({ isOpen, onOpenChange, onStartDM }: StartDMModalPr
                     className="w-full text-left px-3 py-2 hover:bg-muted/60"
                     onClick={() => {
                       // prefer passing canonical user id to starter
+                      const label = u.displayName || u.name || u.username || '';
                       setUsername(u.username || u.displayName || u.name || '');
                       onStartDM(u.id);
                       onOpenChange(false);
-                      toast({ title: 'DM Started', description: `Started a conversation with ${u.displayName || uname}` });
+                      toast({ title: 'DM Started', description: `Started a conversation with ${label}` });
                     }}
                   >
                     <div className="flex items-center gap-2">

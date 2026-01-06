@@ -58,7 +58,7 @@ const Profile = () => {
   // Minimal profile view: show avatar, name, optional age/country/gender/bio and simple badges
   const display = viewUser || currentUser;
   const showAge = (display as any).age !== undefined && (display as any).age !== null;
-  const showCountry = (display as any).country;
+  const showCountry = (display as any).country || (display as any).location;
   const showGender = (display as any).gender;
   const showBio = (display as any).bio;
   const isGuest = (display as any).userType === 'guest' || (display as any).isAnonymous;
@@ -100,8 +100,13 @@ const Profile = () => {
                           <button title="Private message" className="w-full text-left px-3 py-2 hover:bg-muted" onClick={async () => {
                             setMenuOpen(false);
                             try {
-                              const roomId = await RoomService.createDMRoom(user?.uid || '', display.id);
-                              navigate(`/rooms/${roomId}`);
+                              const myId = currentUser?.id || user?.uid || '';
+                              if (!myId || display.id === myId) {
+                                setActionMsg('You cannot message yourself');
+                                return;
+                              }
+                              const roomId = await RoomService.createDMRoom(myId, display.id);
+                              navigate(`/dashboard?dm=${encodeURIComponent(roomId)}`);
                             } catch (e) {
                               setActionMsg('Could not start private message');
                             }
@@ -109,7 +114,17 @@ const Profile = () => {
                           <button title="Add friend" className="w-full text-left px-3 py-2 hover:bg-muted" onClick={async () => {
                             setMenuOpen(false);
                             try {
-                              await FriendService.sendFriendRequest(user?.uid || '', display.id);
+                              const myId = currentUser?.id || user?.uid || '';
+                              const resp = await FriendService.sendFriendRequest(myId, display.id);
+                              const msg = String(resp?.message || '').toLowerCase();
+                              if (msg.includes('already friends')) {
+                                setActionMsg('Already friends');
+                                return;
+                              }
+                              if (msg.includes('already') || msg.includes('pending')) {
+                                setActionMsg('Already sent request');
+                                return;
+                              }
                               setActionMsg('Friend request sent');
                             } catch (e) { setActionMsg('Could not send friend request'); }
                           }}>Add friend</button>
@@ -137,7 +152,7 @@ const Profile = () => {
             <div className="w-28 h-28 mb-4">
               <button title="View profile photo" onClick={() => {
                 const settings = (display as any).settings || {};
-                const visibility = settings.profilePhotoVisibility || 'everyone';
+                const visibility = settings?.privacy?.profilePhotoVisibility || settings.profilePhotoVisibility || 'everyone';
                 const viewerId = currentUser?.id || user?.uid || null;
                 const isOwner = !viewUser || (display.id && (display.id === viewerId));
                 const isFriend = viewerId && Array.isArray((display as any).friends) && (display as any).friends.includes(viewerId);
@@ -149,7 +164,7 @@ const Profile = () => {
               }} className="w-28 h-28 rounded-full overflow-hidden mx-auto bg-muted flex items-center justify-center">
                 {(() => {
                   const settings = (display as any).settings || {};
-                  const visibility = settings.profilePhotoVisibility || 'everyone';
+                  const visibility = settings?.privacy?.profilePhotoVisibility || settings.profilePhotoVisibility || 'everyone';
                   const viewerId = currentUser?.id || user?.uid || null;
                   const isOwner = !viewUser || (display.id && (display.id === viewerId));
                   const isFriend = viewerId && Array.isArray((display as any).friends) && (display as any).friends.includes(viewerId);
@@ -180,12 +195,12 @@ const Profile = () => {
 
             <div className="text-sm text-muted-foreground mb-4">
               {showAge && <div>Age: {(display as any).age}</div>}
-              {showCountry && <div>Country: {(display as any).country}</div>}
               {showGender && <div>Gender: {(display as any).gender}</div>}
             </div>
 
             <div className="text-sm text-muted-foreground mb-3">
               <div>Profile views: {(display as any).profileViews?.count ?? 0}</div>
+              {showCountry && <div>Country: {showCountry}</div>}
               <div>Level: {(display as any).chatStats?.level ?? 0} — Messages: {(display as any).chatStats?.totalMessages ?? 0}</div>
             </div>
 

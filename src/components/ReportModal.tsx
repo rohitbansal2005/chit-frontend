@@ -5,6 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "@/hooks/use-toast";
+import { apiClient } from "@/lib/apiClient";
 import { 
   Flag,
   AlertTriangle
@@ -15,7 +16,7 @@ const MAX_REPORT_CHARACTERS = 500;
 interface ReportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  messageId: string;
+  messageId?: string;
   userId: string;
   userName: string;
 }
@@ -37,6 +38,7 @@ export const ReportModal = ({ isOpen, onClose, messageId, userId, userName }: Re
   const [selectedReason, setSelectedReason] = useState<string>("");
   const [additionalDetails, setAdditionalDetails] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isMessageReport = Boolean(messageId);
 
   const handleSubmit = async () => {
     if (!selectedReason) {
@@ -51,8 +53,12 @@ export const ReportModal = ({ isOpen, onClose, messageId, userId, userName }: Re
     setIsSubmitting(true);
 
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await apiClient.post('/reports', {
+        messageId: messageId || undefined,
+        targetUserId: userId,
+        reason: selectedReason,
+        details: additionalDetails
+      });
 
       const selectedReasonLabel = reportReasons.find(r => r.value === selectedReason)?.label;
 
@@ -61,15 +67,7 @@ export const ReportModal = ({ isOpen, onClose, messageId, userId, userName }: Re
         description: `Your report against ${userName} has been submitted successfully. We'll review it shortly.`,
       });
 
-      console.log({
-        messageId,
-        userId,
-        userName,
-        reason: selectedReason,
-        reasonLabel: selectedReasonLabel,
-        additionalDetails,
-        timestamp: new Date().toISOString()
-      });
+      console.log({ messageId, userId, userName, reason: selectedReason, reasonLabel: selectedReasonLabel, additionalDetails });
 
       // Reset form
       setSelectedReason("");
@@ -92,7 +90,7 @@ export const ReportModal = ({ isOpen, onClose, messageId, userId, userName }: Re
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
             <Flag className="w-5 h-5" />
-            Report Message
+            {isMessageReport ? 'Report Message' : 'Report User'}
           </DialogTitle>
         </DialogHeader>
 
@@ -100,7 +98,9 @@ export const ReportModal = ({ isOpen, onClose, messageId, userId, userName }: Re
           <div className="bg-muted/50 border border-border rounded-lg p-3">
             <div className="flex items-center gap-2 text-sm">
               <AlertTriangle className="w-4 h-4 text-orange-500" />
-              <span>Reporting message from <strong>{userName}</strong></span>
+              <span>
+                Reporting {isMessageReport ? 'message' : 'user'} from <strong>{userName}</strong>
+              </span>
             </div>
           </div>
 

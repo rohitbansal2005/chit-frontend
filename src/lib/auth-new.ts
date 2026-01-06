@@ -45,7 +45,6 @@ export const mapApiUserToAuthUser = (apiUser: Partial<AuthUser> & { id?: string;
     location: (apiUser as any).location || (customData as any)?.location,
     dob: (apiUser as any).dob || (customData as any)?.dob,
     settings: (apiUser as any).settings || (customData as any)?.settings,
-    dob: (apiUser as any).dob || (customData as any)?.dob,
     isOnline: apiUser.isOnline ?? customData?.isOnline ?? false,
     isAnonymous: apiUser.isAnonymous ?? false,
     premiumStatus: apiUser.premiumStatus || 'free',

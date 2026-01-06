@@ -34,6 +34,13 @@ interface AuthApiUser {
   photoURL?: string;
   avatar?: string;
   bio?: string;
+  gender?: string;
+  location?: string;
+  dob?: string | Date;
+  settings?: any;
+  lastUsernameChange?: string | Date;
+  username?: string;
+  emailVerified?: boolean;
   isOnline?: boolean;
   isAnonymous?: boolean;
   lastSeen?: string | Date;
@@ -61,13 +68,22 @@ interface AuthProviderProps {
 
 const normalizeUser = (apiUser: AuthApiUser | null): AuthUser | null => {
   if (!apiUser) return null;
+  const avatarUrl = (apiUser.avatar || apiUser.photoURL || '').toString().trim();
   return mapApiUserToAuthUser({
     id: apiUser.id,
     uid: apiUser.uid || apiUser.id,
     email: apiUser.email,
     name: apiUser.name || apiUser.displayName,
-    avatar: apiUser.avatar || apiUser.photoURL,
+    displayName: apiUser.displayName,
+    username: (apiUser as any).username,
+    avatar: avatarUrl || undefined,
     bio: apiUser.bio,
+    gender: apiUser.gender,
+    location: apiUser.location,
+    dob: apiUser.dob,
+    settings: apiUser.settings,
+    lastUsernameChange: apiUser.lastUsernameChange as any,
+    emailVerified: apiUser.emailVerified,
     isOnline: apiUser.isOnline,
     isAnonymous: apiUser.isAnonymous,
     premiumStatus: apiUser.premiumStatus,
@@ -181,17 +197,21 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const updated: AuthApiUser = {
       id: updatedRaw.id || updatedRaw._id || String(updatedRaw.guestId || state.user.id),
       uid: updatedRaw.uid || updatedRaw.id || updatedRaw._id || String(updatedRaw.guestId || state.user.id),
-      email: updatedRaw.email || state.user.email,
-      name: updatedRaw.name || updatedRaw.displayName || state.user.name,
-      displayName: updatedRaw.displayName || updatedRaw.name || state.user.displayName,
-      userType: updatedRaw.userType || state.user.userType,
-      avatar: updatedRaw.avatar || updatedRaw.photoURL || state.user.avatar,
-      bio: updatedRaw.bio || state.user.bio,
-      gender: updatedRaw.gender || state.user.gender,
-      location: updatedRaw.location || state.user.location,
-      dob: updatedRaw.dob || state.user.dob,
-      settings: updatedRaw.settings || state.user?.settings,
-      createdAt: updatedRaw.createdAt || state.user.createdAt
+      email: updatedRaw.email ?? state.user.email,
+      emailVerified: updatedRaw.emailVerified ?? (state.user as any).emailVerified,
+      name: (updatedRaw.name ?? updatedRaw.displayName) ?? state.user.name,
+      displayName: (updatedRaw.displayName ?? updatedRaw.name) ?? state.user.displayName,
+      userType: updatedRaw.userType ?? state.user.userType,
+      premiumStatus: updatedRaw.premiumStatus ?? state.user.premiumStatus,
+      avatar: (updatedRaw.avatar ?? updatedRaw.photoURL) ?? state.user.avatar,
+      bio: updatedRaw.bio ?? state.user.bio,
+      gender: updatedRaw.gender ?? (state.user as any).gender,
+      location: updatedRaw.location ?? (state.user as any).location,
+      dob: updatedRaw.dob ?? (state.user as any).dob,
+      settings: updatedRaw.settings ?? (state.user as any)?.settings,
+      lastUsernameChange: updatedRaw.lastUsernameChange ?? (state.user as any).lastUsernameChange,
+      username: updatedRaw.username ?? (state.user as any).username,
+      createdAt: updatedRaw.createdAt ?? state.user.createdAt
     } as AuthApiUser;
 
     setState(prev => ({ ...prev, user: normalizeUser(updated) }));

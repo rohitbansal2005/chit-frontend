@@ -54,6 +54,7 @@ import {
   Clock,
   Shield,
   MessageSquare,
+  MoreVertical,
   X,
   SkipForward,
   Send,
@@ -63,8 +64,13 @@ import {
   Smile,
   Wrench
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
 import { useAuth } from '@/contexts/AuthContext-new';
-
 
 interface User {
   name: string;
@@ -87,7 +93,7 @@ interface Room {
   name: string;
   description: string;
   members: number;
-  type: 'public' | 'private';
+  type: 'public' | 'private' | 'dm';
   category: string;
   isOnline?: boolean;
   lastMessage?: string;
@@ -195,6 +201,101 @@ export const ChatDashboard = ({
   
   const [friendRequestUsers, setFriendRequestUsers] = useState<Record<string, AppUser>>({});
   const navigate = useNavigate();
+  const selfId = (user as any)?.id || user?.uid;
+
+  const isTechnicalDmName = (name?: string | null) => {
+    if (!name) return false;
+    const s = String(name);
+    // Backend currently stores DM names like: DM:<userId1>:<userId2>
+    return s.startsWith('DM:') || s.includes('guest-') || s.includes('dm-');
+  };
+
+  const getDmPartnerId = (dmRoom: ChatRoom | null) => {
+    if (!dmRoom) return undefined;
+    const members: string[] = ((dmRoom.participants || dmRoom.members || []) as any) || [];
+    const selfId = (user as any)?.id || user?.uid;
+    const partnerId = Array.isArray(members) ? members.find(m => m && m !== selfId) : undefined;
+    return partnerId || (dmRoom.settings && (dmRoom.settings.matchUserId as any)) || undefined;
+  };
+
+  const getDmDisplayName = (dmRoom: ChatRoom | null) => {
+    if (!dmRoom) return 'Direct message';
+    const partner = dmPartners[dmRoom.id];
+    const partnerName = partner?.displayName || partner?.username || partner?.name;
+    if (partnerName) return partnerName;
+
+    const settingsName = dmRoom.settings && (dmRoom.settings.matchUserName as any);
+    if (settingsName) return String(settingsName);
+
+    // fall back to room.name only if it's not a technical placeholder
+    if (dmRoom.name && !isTechnicalDmName(dmRoom.name)) return dmRoom.name;
+    return 'Direct message';
+  };
+
+  const getDmPartnerIdFromRoom = (dmRoom: ChatRoom | null) => {
+    if (!dmRoom) return undefined;
+    const selfId = (user as any)?.id || user?.uid;
+    const members: string[] = ((dmRoom.participants || dmRoom.members || []) as any) || [];
+    const partnerId = Array.isArray(members) ? members.find(m => m && m !== selfId) : undefined;
+    return partnerId || (dmRoom.settings && (dmRoom.settings.matchUserId as any)) || undefined;
+  };
+
+  const getDmPartnerOnline = (dmRoom: ChatRoom | null): boolean | null => {
+    if (!dmRoom) return null;
+
+    // First: if we have the partner profile cached for this DM room
+    const cached = dmPartners[dmRoom.id] as any;
+    if (cached) {
+      // treat missing field as offline if partner is known
+      return Boolean(cached.isOnline);
+    }
+
+    // Fallback: try matching by partnerId against friends/onlineUsers state
+    const partnerId = getDmPartnerIdFromRoom(dmRoom);
+    if (!partnerId) return null;
+
+    const friend = friendsList.find(f => String(f.id) === String(partnerId));
+    if (friend) return Boolean((friend as any).isOnline);
+
+    const online = onlineUsers.find(u => String(u.id) === String(partnerId));
+    if (online) return true;
+
+    return null;
+  };
+
+  const getDmStatusText = (dmRoom: ChatRoom | null) => {
+    const online = getDmPartnerOnline(dmRoom);
+    if (online === true) return 'Online';
+    if (online === false) return 'Offline';
+    return 'Direct message';
+  };
+
+  const handleRemoveDMForMe = async (roomId: string) => {
+    try {
+      await RoomService.hideRoom(roomId);
+      setDirectMessages(prev => prev.filter(r => r.id !== roomId));
+      setDmConversations(prev => {
+        const copy = { ...prev };
+        delete copy[roomId];
+        return copy;
+      });
+      setDmPartners(prev => {
+        const copy = { ...prev };
+        delete copy[roomId];
+        return copy;
+      });
+      if (activeDMRoom?.id === roomId) {
+        handleCloseDMView();
+      }
+      toast({ title: 'Removed', description: 'This DM was removed for you.' });
+    } catch (err: any) {
+      toast({
+        title: 'Could not remove DM',
+        description: err?.message || 'Please try again.',
+        variant: 'destructive'
+      });
+    }
+  };
 
   const activeRandomRoom = currentRandomRoom || localRandomRoom;
   const isRandomExperienceActive = isRandomChatActive || !!localRandomRoom;
@@ -205,8 +306,8 @@ export const ChatDashboard = ({
   useEffect(() => {
     const room = activeRandomRoom as any;
     const roomId = room?.id;
-    // Only poll DM rooms
-    if (!roomId || room.type !== 'dm') {
+    // Only poll when we actually have an active random room id
+    if (!roomId) {
       if (randomPollerRef.current?.intervalId) {
         clearInterval(randomPollerRef.current.intervalId);
         randomPollerRef.current = null;
@@ -229,19 +330,19 @@ export const ChatDashboard = ({
       if (cancelled) return;
       try {
         const msgs = await MessageService.getRoomMessages(roomId, 100);
-        const mapped = msgs.map((m: any) => ({
-          id: m.id,
-          text: m.content || m.body || m.message || m.payload || m.text || '',
-          sender: m.senderId === user?.uid ? 'user' : 'partner',
-          timestamp: new Date(m.timestamp || m.createdAt || Date.now()),
-          senderName: m.senderName || (m.senderId === user?.uid ? (user?.displayName || user?.name) : (activeRandomPartner?.displayName || activeRandomPartner?.name || 'Stranger'))
+        const mapped: Array<{ id: string; text: string; sender: 'user' | 'stranger'; timestamp: Date; senderName: string }> = (msgs || []).map((m: any) => ({
+          id: String(m?.id ?? m?._id ?? ''),
+          text: String(m?.content || m?.body || m?.message || m?.payload || m?.text || ''),
+          sender: m?.senderId === user?.uid ? 'user' : 'stranger',
+          timestamp: new Date(m?.timestamp || m?.createdAt || Date.now()),
+          senderName: String(m?.senderName || (m?.senderId === user?.uid ? (user?.displayName || user?.name) : (activeRandomPartner?.displayName || activeRandomPartner?.name || 'Stranger')))
         }));
 
         setRandomChatMessages(prev => {
           const existing = new Map(prev.map(p => [p.id, p]));
           const newList = [...prev];
 
-          mapped.forEach((mm: any) => {
+          mapped.forEach((mm) => {
             if (existing.has(mm.id)) return;
 
             const matchIndex = newList.findIndex(p => (
@@ -352,7 +453,7 @@ export const ChatDashboard = ({
         setBlockedUsers(blocked.filter(Boolean) as AppUser[]);
 
         // Load friend requests
-        const requests = await FriendService.getUserFriendRequests(user.uid);
+        const requests = await FriendService.getUserFriendRequests(selfId as any);
         setFriendRequests(requests);
 
         setLoading(false);
@@ -363,7 +464,65 @@ export const ChatDashboard = ({
     };
 
     loadData();
+
+    const onBlockedUsersUpdated = () => {
+      loadData();
+    };
+
+    try {
+      window.addEventListener('chitz:blocked-users-updated', onBlockedUsersUpdated as any);
+    } catch (e) {}
+
+    return () => {
+      try {
+        window.removeEventListener('chitz:blocked-users-updated', onBlockedUsersUpdated as any);
+      } catch (e) {}
+    };
   }, [user]);
+
+  const refreshFriendRequests = async () => {
+    if (!user) return;
+    try {
+      const requests = await FriendService.getUserFriendRequests(selfId as any);
+      setFriendRequests(requests);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  // Keep friend request badge in sync (polling)
+  useEffect(() => {
+    if (!user) return;
+
+    let cancelled = false;
+    const shouldPollNow = () => {
+      try {
+        if (typeof document !== 'undefined' && document.hidden) return false;
+        // @ts-ignore
+        if (typeof window !== 'undefined' && window?.document && typeof window.document.hasFocus === 'function') {
+          // @ts-ignore
+          if (!window.document.hasFocus()) return false;
+        }
+      } catch (e) {
+        // ignore
+      }
+      return true;
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (!shouldPollNow()) return;
+      await refreshFriendRequests();
+    };
+
+    // quick initial refresh, then poll
+    tick();
+    const intervalId = setInterval(tick, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [user?.uid, (user as any)?.id]);
 
   // Room operations
   const handleJoinRoom = async (roomId: string) => {
@@ -389,9 +548,22 @@ export const ChatDashboard = ({
   const handleAcceptFriendRequest = async (requestId: string) => {
     if (!user) return;
     try {
+      const req = friendRequests.find(r => String(r.id) === String(requestId));
       await FriendService.acceptFriendRequest(requestId);
+      setFriendRequests(prev => prev.filter(r => String(r.id) !== String(requestId)));
+      if (req?.fromUserId) {
+        const friend = await UserService.getUserById(req.fromUserId).catch(() => null);
+        if (friend) {
+          setFriendsList(prev => {
+            const exists = prev.some(p => String(p.id) === String(friend.id));
+            return exists ? prev : [...prev, friend];
+          });
+        }
+      }
+      toast({ title: 'Friend added', description: 'Friend request accepted.' });
     } catch (error) {
       console.error('Error accepting friend request:', error);
+      toast({ title: 'Could not accept', description: 'Please try again.', variant: 'destructive' });
     }
   };
 
@@ -399,8 +571,11 @@ export const ChatDashboard = ({
     if (!user) return;
     try {
       await FriendService.rejectFriendRequest(requestId);
+      setFriendRequests(prev => prev.filter(r => String(r.id) !== String(requestId)));
+      toast({ title: 'Request declined' });
     } catch (error) {
       console.error('Error rejecting friend request:', error);
+      toast({ title: 'Could not decline', description: 'Please try again.', variant: 'destructive' });
     }
   };
 
@@ -408,6 +583,15 @@ export const ChatDashboard = ({
     if (!user) return;
     try {
       await UserService.blockUser(user.uid, userId);
+      const blockedUser = await UserService.getUserById(userId);
+      if (blockedUser) {
+        setBlockedUsers(prev => {
+          const exists = prev.some(p => String(p.id) === String(blockedUser.id));
+          return exists ? prev : [...prev, blockedUser];
+        });
+      }
+      // Optional: remove from friends list view immediately
+      setFriendsList(prev => prev.filter(f => String(f.id) !== String(userId)));
     } catch (error) {
       console.error('Error blocking user:', error);
     }
@@ -417,6 +601,7 @@ export const ChatDashboard = ({
     if (!user) return;
     try {
       await UserService.unblockUser(user.uid, userId);
+      setBlockedUsers(prev => prev.filter(b => String(b.id) !== String(userId)));
     } catch (error) {
       console.error('Error unblocking user:', error);
     }
@@ -490,7 +675,7 @@ export const ChatDashboard = ({
       setRandomChatMessages(prev => [...prev, newMessage]);
 
       // If socket connected, emit; otherwise fall back to MessageService
-      if (socketRef.current && socketConnected && (room as any).type === 'dm') {
+      if (socketRef.current && socketConnected) {
         try {
           socketRef.current.emit('room:message', { roomId: room.id, senderId: user.uid, senderName: user.displayName || user.name, content: outgoingText });
         } catch (err) {
@@ -601,6 +786,7 @@ export const ChatDashboard = ({
       const params = new URLSearchParams(location.search || '');
       params.delete('random');
       params.delete('partner');
+      params.delete('room');
       const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
       navigate(newPath, { replace: true });
     } catch (e) {
@@ -699,7 +885,8 @@ export const ChatDashboard = ({
       for (const dm of directMessages) {
         try {
           const members: string[] = (dm.participants || dm.members || []) as any;
-          const partnerId = members && Array.isArray(members) ? members.find(m => m !== user.uid) : undefined;
+          const selfId = (user as any)?.id || user.uid;
+          const partnerId = members && Array.isArray(members) ? members.find(m => m !== selfId) : undefined;
           if (partnerId) {
             const u = await UserService.getUserById(partnerId).catch(() => null);
             if (u && !cancelled) map[dm.id] = u;
@@ -715,7 +902,7 @@ export const ChatDashboard = ({
 
     loadPartners();
     return () => { cancelled = true; };
-  }, [directMessages, user?.uid]);
+  }, [directMessages, (user as any)?.id, user?.uid]);
 
   // Filter people data based on search
   const filteredFriends = friendsList.filter(friend => {
@@ -822,9 +1009,13 @@ export const ChatDashboard = ({
   const handleRemoveFriend = async (friendId: string) => {
     if (!user) return;
     try {
-      await FriendService.removeFriend(user.uid, friendId);
+      const myId = (user as any)?.id || user.uid;
+      await FriendService.removeFriend(myId, friendId);
+      setFriendsList(prev => prev.filter(f => String(f.id) !== String(friendId)));
+      toast({ title: 'Unfriended', description: 'Removed from both sides.' });
     } catch (error) {
       console.error('Error removing friend:', error);
+      toast({ title: 'Could not unfriend', description: 'Please try again.', variant: 'destructive' });
     }
   };
 
@@ -883,6 +1074,11 @@ export const ChatDashboard = ({
   };
 
   const handleMessageFriend = (friendId: string) => {
+    if (!user?.uid) return;
+    if (friendId === user.uid) {
+      try { toast({ title: 'Not allowed', description: 'You cannot message yourself.' }); } catch (e) {}
+      return;
+    }
     (async () => {
       try {
         // Prefer creating / finding a real DM room on the server
@@ -970,6 +1166,10 @@ export const ChatDashboard = ({
       }
 
       if (targetUser) {
+        if (targetUser.id === user.uid) {
+          try { toast({ title: 'Not allowed', description: 'You cannot message yourself.' }); } catch (e) {}
+          return;
+        }
         // Create or find existing DM room
         const dmRoomId = await RoomService.createDMRoom(user.uid, targetUser.id);
         const dmRoom = await RoomService.getRoomById(dmRoomId);
@@ -1054,6 +1254,7 @@ export const ChatDashboard = ({
             const params = new URLSearchParams(location.search || '');
             params.set('random', '1');
             params.set('partner', partnerId);
+            if (roomId) params.set('room', String(roomId));
             const newPath = `${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
             navigate(newPath, { replace: true });
           } catch (e) {}
@@ -1066,12 +1267,12 @@ export const ChatDashboard = ({
         });
 
         socketRef.current.on('room:message', (msg: any) => {
-          const mapped = {
-            id: msg.id,
-            text: msg.content || msg.message || msg.body || '',
-            sender: msg.senderId === user?.uid ? 'user' : 'partner',
-            timestamp: new Date(msg.timestamp || Date.now()),
-            senderName: msg.senderName || (msg.senderId === user?.uid ? (user?.displayName || user?.name) : 'Stranger')
+          const mapped: { id: string; text: string; sender: 'user' | 'stranger'; timestamp: Date; senderName: string } = {
+            id: String(msg?.id ?? ''),
+            text: String(msg?.content || msg?.message || msg?.body || ''),
+            sender: msg?.senderId === user?.uid ? 'user' : 'stranger',
+            timestamp: new Date(msg?.timestamp || Date.now()),
+            senderName: String(msg?.senderName || (msg?.senderId === user?.uid ? (user?.displayName || user?.name) : 'Stranger'))
           };
           setRandomChatMessages(prev => {
             if (prev.find(p => p.id === mapped.id)) return prev;
@@ -1186,50 +1387,46 @@ export const ChatDashboard = ({
       const params = new URLSearchParams(location.search || '');
       const isRandom = params.get('random');
       const partnerId = params.get('partner');
+      const roomId = params.get('room');
       if (isRandom && !isRandomExperienceActive) {
         // If partner id present, try to restore that partner
         (async () => {
-          if (partnerId) {
+          if (roomId) {
             try {
-              const partner = await UserService.getUserById(partnerId);
-              if (partner) {
-                const friendlyName = partner.displayName || partner.name || 'Stranger';
-                const restoredRoom: ChatRoom = {
-                  id: `random-restored-${Date.now()}`,
-                  name: `Chat with ${friendlyName}`,
-                  description: 'Restored random chat',
-                  type: 'dm',
-                  owner: user?.uid || 'guest',
-                  createdBy: user?.uid || 'guest',
-                  participants: [user?.uid || 'guest', partner.id],
-                  members: [user?.uid || 'guest', partner.id],
-                  admins: [user?.uid || 'guest'],
-                  moderators: [],
-                  settings: {
-                    matchType: 'one-to-one',
-                    matchUserId: partner.id,
-                    matchUserName: friendlyName,
-                    matchUserAvatar: partner.photoURL || partner.avatar || ''
-                  },
-                  category: 'random',
-                  isActive: true,
-                  createdAt: new Date(),
-                  updatedAt: new Date(),
-                  lastActivity: new Date(),
-                  messageCount: 0
-                } as ChatRoom & { matchedUser?: AppUser };
-                (restoredRoom as any).matchedUser = partner;
-                setLocalRandomRoom(restoredRoom);
-                setLocalRandomPartner(partner);
-                setRandomChatMessages([]);
-                setShowMobileContent(true);
-              } else {
-                // fallback: start normal random chat
-                await handleRandomChat();
-              }
+              const room = await RoomService.getRoomById(String(roomId));
+
+              // Always restore using the REAL room id so DB messages can reload
+              // (we still use type 'dm' locally for the random-chat UI expectations)
+              const partner = partnerId ? await UserService.getUserById(partnerId).catch(() => null) : null;
+              const friendlyName = partner?.displayName || partner?.name || 'Stranger';
+
+              const restoredRoom: ChatRoom = {
+                ...(room || {}),
+                id: String(roomId),
+                name: `Chat with ${friendlyName}`,
+                type: 'dm',
+                category: 'random',
+                participants: (room as any)?.participants || (room as any)?.members || [user?.uid || 'guest', partnerId].filter(Boolean),
+                members: (room as any)?.members || (room as any)?.participants || [user?.uid || 'guest', partnerId].filter(Boolean),
+                settings: {
+                  ...(((room as any)?.settings) || {}),
+                  ...(partnerId ? { matchUserId: partnerId, matchUserName: friendlyName } : {})
+                }
+              } as ChatRoom & { matchedUser?: AppUser };
+              (restoredRoom as any).matchedUser = partner || (partnerId ? { id: partnerId, name: 'Stranger', displayName: 'Stranger' } : undefined);
+
+              setLocalRandomRoom(restoredRoom);
+              setLocalRandomPartner((restoredRoom as any).matchedUser || null);
+              setRandomChatMessages([]);
+              setRandomPartnerConnected(true);
+              setIsRandomChatSearching(false);
+              setShowMobileContent(true);
             } catch (err) {
               await handleRandomChat();
             }
+          } else if (partnerId) {
+            // Back-compat: older URLs may have only partner id
+            await handleRandomChat();
           } else {
             await handleRandomChat();
           }
@@ -1255,7 +1452,7 @@ export const ChatDashboard = ({
   return (
     <div className="flex h-screen bg-background overflow-hidden">
       {/* Sidebar */}
-      <div className={`${showMobileContent ? 'hidden' : 'w-full'} md:w-80 border-r bg-card flex flex-col h-screen md:flex`}>
+      <div className={`${showMobileContent ? 'hidden' : 'w-full'} md:w-80 border-r bg-card flex flex-col h-screen md:flex overflow-y-auto` }>
         {/* Header */}
         <div className="p-3 md:p-4 border-b flex-shrink-0">
           {/* Mobile Content Access Button */}
@@ -1283,7 +1480,7 @@ export const ChatDashboard = ({
                 <span className="sr-only">Open feature drawer</span>
               </Button>
               <Avatar className="w-8 h-8 flex-shrink-0">
-                {user.avatar && <AvatarImage src={user.avatar} alt={user.name} />}
+                {user.photoURL && <AvatarImage src={user.photoURL} alt={user.name} />}
                 <AvatarFallback className="bg-primary text-primary-foreground text-sm">
                   {(user.name || user.displayName || '').charAt(0).toUpperCase()}
                 </AvatarFallback>
@@ -1333,7 +1530,14 @@ export const ChatDashboard = ({
             <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="public">Rooms</TabsTrigger>
               <TabsTrigger value="dms">Messages</TabsTrigger>
-              <TabsTrigger value="people">People</TabsTrigger>
+              <TabsTrigger value="people">
+                People
+                {friendRequests.length > 0 && (
+                  <Badge variant="destructive" className="ml-1 text-xs">
+                    {friendRequests.length}
+                  </Badge>
+                )}
+              </TabsTrigger>
             </TabsList>
           </div>
 
@@ -1375,7 +1579,7 @@ export const ChatDashboard = ({
                           <div className="flex-shrink-0">
                             <Avatar className="w-10 h-10">
                               <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                                {(room.name || room.displayName || '').charAt(0).toUpperCase()}
+                                {(room.name || '').charAt(0).toUpperCase()}
                               </AvatarFallback>
                             </Avatar>
                           </div>
@@ -1385,11 +1589,10 @@ export const ChatDashboard = ({
                                  <h4 className="font-medium text-sm truncate">{room.name}</h4>
                                  {room.type === 'private' && <Lock className="w-3 h-3 text-muted-foreground flex-shrink-0" />}
                                  {room.owner === user?.uid && <Badge variant="outline" className="text-xs flex-shrink-0">Owner</Badge>}
-                                 {room.createdBySystem && <Badge variant="outline" className="text-xs flex-shrink-0">System</Badge>}
                                </div>
                                <div className="flex items-center gap-2">
                                  <Badge variant="secondary" className="text-xs flex-shrink-0">
-                                   {room.memberCount ?? (Array.isArray(room.members) ? room.members.length : room.members || 0)}
+                                   {Array.isArray(room.members) ? room.members.length : (room.participants?.length || 0)}
                                  </Badge>
                                  {joinedPublicRooms.includes(room.id) && (
                                    <AlertDialog>
@@ -1461,7 +1664,7 @@ export const ChatDashboard = ({
                 {filteredDMs.map((dm) => (
                   <Card 
                     key={dm.id} 
-                    className={`professional-card cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in ${activeDMRoom?.id === dm.id ? 'ring-2 ring-primary bg-muted/20' : ''}`}
+                    className={`professional-card group cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in ${activeDMRoom?.id === dm.id ? 'ring-2 ring-primary bg-muted/20' : ''}`}
                     onClick={() => focusDMWithRoom(dm)}
                     aria-current={activeDMRoom?.id === dm.id}
                   >
@@ -1469,24 +1672,41 @@ export const ChatDashboard = ({
                       <div className="flex items-center gap-2 md:gap-3">
                         <div className="relative flex-shrink-0">
                           <Avatar className="w-10 h-10">
-                            {dmPartners[dm.id]?.avatar || dmPartners[dm.id]?.photoURL ? (
-                              <AvatarImage src={dmPartners[dm.id]?.avatar || dmPartners[dm.id]?.photoURL} alt={dmPartners[dm.id]?.displayName || dm.name} />
+                            {dmPartners[dm.id]?.photoURL ? (
+                              <AvatarImage src={dmPartners[dm.id]?.photoURL} alt={dmPartners[dm.id]?.displayName || dm.name} />
                             ) : null}
                             <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                              {((dmPartners[dm.id]?.displayName || dm.name || dm.displayName) || '').charAt(0).toUpperCase()}
+                              {(getDmDisplayName(dm) || '').charAt(0).toUpperCase()}
                             </AvatarFallback>
                           </Avatar>
-                          {/* Online status is handled by the backend presence service */}
+                          {getDmPartnerOnline(dm) === true && (
+                            <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-500 border-2 border-background rounded-full"></div>
+                          )}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between">
-                            <h4 className="font-medium text-sm truncate">{dmPartners[dm.id]?.displayName || dm.name || dm.displayName}</h4>
+                            <h4 className="font-medium text-sm truncate">{getDmDisplayName(dm)}</h4>
                             {/* Unread count will be implemented with message service */}
                           </div>
                           {/* Last message will be fetched from message service */}
                           <p className="text-xs text-muted-foreground truncate">
-                            Direct message
+                            {getDmStatusText(dm)}
                           </p>
+                        </div>
+
+                        <div className="flex-shrink-0">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+                            title="Remove from my list"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveDMForMe(dm.id);
+                            }}
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
                         </div>
                       </div>
                     </CardContent>
@@ -1516,9 +1736,9 @@ export const ChatDashboard = ({
                   </TabsTrigger>
                   <TabsTrigger value="requests" className="text-xs">
                     Requests
-                    {filteredFriendRequests.filter(r => r.toUserId === user?.uid).length > 0 && (
+                    {friendRequests.length > 0 && (
                       <Badge variant="destructive" className="ml-1 text-xs">
-                        {filteredFriendRequests.filter(r => r.toUserId === user?.uid).length}
+                        {friendRequests.length}
                       </Badge>
                     )}
                   </TabsTrigger>
@@ -1558,7 +1778,11 @@ export const ChatDashboard = ({
                               <div className="flex items-center justify-between">
                                 <div>
                                   <h4 className="font-medium text-sm">{friend.displayName || friend.name}</h4>
-                                  <p className="text-xs text-muted-foreground">@{friend.username}</p>
+                                  {friend.username ? (
+                                    <p className="text-xs text-muted-foreground">@{friend.username}</p>
+                                  ) : (
+                                    <p className="text-xs text-muted-foreground">{friend.email ? String(friend.email) : ''}</p>
+                                  )}
                                 </div>
                                 <div className="flex items-center gap-1">
                                   <Button
@@ -1569,14 +1793,27 @@ export const ChatDashboard = ({
                                   >
                                     <MessageSquare className="w-4 h-4" />
                                   </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleRemoveFriend(friend.id)}
-                                    className="h-8 w-8 p-0 text-red-500 hover:text-red-600"
-                                  >
-                                    <UserX className="w-4 h-4" />
-                                  </Button>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-8 w-8 p-0"
+                                        aria-label="Friend actions"
+                                      >
+                                        <MoreVertical className="w-4 h-4" />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                      <DropdownMenuItem
+                                        className="text-red-600 focus:text-red-600"
+                                        onClick={() => handleRemoveFriend(friend.id)}
+                                      >
+                                        <UserX className="w-4 h-4 mr-2" />
+                                        Unfriend
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
                                 </div>
                               </div>
                               <div className="mt-1">
@@ -1764,7 +2001,7 @@ export const ChatDashboard = ({
           {activeDMRoom ? (
             <div className="w-full h-full flex flex-col bg-card border-l border-r pt-0 md:pt-0 max-h-screen overflow-hidden">
               <ChatRoomComponent
-                roomName={activeDMRoom.name || (dmPartners[activeDMRoom.id]?.displayName || 'Direct message')}
+                roomName={getDmDisplayName(activeDMRoom)}
                 roomId={activeDMRoom.id}
                 roomType={'dm'}
                 participants={((activeDMRoom.members || activeDMRoom.participants) && (activeDMRoom.members || activeDMRoom.participants).length) || 2}
@@ -1773,12 +2010,14 @@ export const ChatDashboard = ({
                   name: user?.displayName || user?.name || 'You',
                   type: user?.isAnonymous ? 'guest' : 'email',
                   email: user?.email,
-                  avatar: user?.avatar || user?.photoURL
+                  avatar: user?.photoURL
                 }}
-                roomImage={dmPartners[activeDMRoom.id]?.avatar || (activeDMRoom.settings && (activeDMRoom.settings.matchUserAvatar || ''))}
-                dmPartnerId={(activeDMRoom.participants || activeDMRoom.members || [])[1] || (activeDMRoom.settings && activeDMRoom.settings.matchUserId)}
-                dmPartnerName={dmPartners[activeDMRoom.id]?.displayName || activeDMRoom.name}
-                dmPartnerAvatar={dmPartners[activeDMRoom.id]?.avatar || (activeDMRoom.settings && activeDMRoom.settings.matchUserAvatar)}
+                currentUserId={(user as any)?.id || user?.uid}
+                roomImage={dmPartners[activeDMRoom.id]?.photoURL}
+                dmPartnerId={getDmPartnerId(activeDMRoom)}
+                dmPartnerName={getDmDisplayName(activeDMRoom)}
+                dmPartnerAvatar={dmPartners[activeDMRoom.id]?.photoURL}
+                dmPartnerIsOnline={getDmPartnerOnline(activeDMRoom) === true}
               />
             </div>
           ) : isExploreRoomsActive ? (
@@ -1847,11 +2086,6 @@ export const ChatDashboard = ({
                                     <Badge variant="secondary" className="text-xs">
                                       {room.category}
                                     </Badge>
-                                    {room.createdBySystem && (
-                                      <Badge variant="outline" className="text-xs">
-                                        System
-                                      </Badge>
-                                    )}
                                     {isJoined && (
                                       <Badge variant="default" className="text-xs bg-green-500">
                                         Joined
@@ -1864,7 +2098,7 @@ export const ChatDashboard = ({
                                   <div className="flex items-center gap-4">
                                     <div className="flex items-center gap-1">
                                       <Users className="w-3 h-3 text-muted-foreground" />
-                                      <span className="text-xs text-muted-foreground">{room.members}</span>
+                                      <span className="text-xs text-muted-foreground">{Array.isArray(room.members) ? room.members.length : (room.participants?.length || 0)}</span>
                                     </div>
                                   </div>
                                 </div>
@@ -1914,33 +2148,30 @@ export const ChatDashboard = ({
               <div className="border-b bg-card px-4 py-3 sticky top-0 z-40">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                      <button
-                        onClick={async () => {
-                          try {
-                            if (activeRandomPartner?.id) {
-                              await UserService.recordProfileView(activeRandomPartner.id, user?.uid);
-                            }
-                          } catch {}
-                          navigate(`/profile?userId=${activeRandomPartner?.id || ''}`);
-                        }}
-                        title={`View ${randomPartnerName} profile`}
-                        className="rounded-full p-0"
-                      >
-                        <Avatar className="w-10 h-10 cursor-pointer">
-                          {activeRandomPartner?.photoURL || activeRandomPartner?.avatar ? (
-                            <AvatarImage src={activeRandomPartner?.photoURL || activeRandomPartner?.avatar || ''} alt={randomPartnerName} />
-                          ) : null}
-                          <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
-                            {(randomPartnerName || '').charAt(0).toUpperCase()}
-                          </AvatarFallback>
-                        </Avatar>
-                      </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          if (activeRandomPartner?.id) {
+                            await UserService.recordProfileView(activeRandomPartner.id, user?.uid);
+                          }
+                        } catch {}
+                        navigate(`/profile?userId=${activeRandomPartner?.id || ''}`);
+                      }}
+                      title={`View ${randomPartnerName} profile`}
+                      className="rounded-full p-0"
+                    >
+                      <Avatar className="w-10 h-10 cursor-pointer">
+                        {activeRandomPartner?.photoURL ? (
+                          <AvatarImage src={activeRandomPartner.photoURL} alt={randomPartnerName} />
+                        ) : null}
+                        <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
+                          {(randomPartnerName || '').charAt(0).toUpperCase()}
+                        </AvatarFallback>
+                      </Avatar>
+                    </button>
                     <div>
-                      <h3 className="font-semibold">Talking with {randomPartnerName || 'Stranger'}</h3>
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                        <span>One-to-one match · private session</span>
-                      </div>
+                      <h3 className="font-medium text-sm">{randomPartnerName}</h3>
+                      <span className="text-xs text-muted-foreground">One-to-one match · private session</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -2096,14 +2327,10 @@ export const ChatDashboard = ({
               </div>
               <h2 className="text-xl font-semibold mb-2">Select a room to start chatting</h2>
               <p className="text-muted-foreground mb-6">
-                Choose from public rooms or start a private conversation with someone
+                Choose a room, start a DM, or try a 1:1 random chat.
               </p>
-              <div className="space-y-2">
-                <Button 
-                  className="w-full chat-gradient text-white" 
-                  onClick={handleRandomChat}
-                  disabled={isRandomChatSearching}
-                >
+              <div className="space-y-3">
+                <Button className="w-full" onClick={handleRandomChat} disabled={isRandomChatSearching}>
                   <Shuffle className="w-4 h-4 mr-2" />
                   {isRandomChatSearching ? 'Finding a match...' : '1:1 Random Chat'}
                 </Button>
@@ -2218,6 +2445,7 @@ export const ChatDashboard = ({
         isOpen={showStartDMModal}
         onOpenChange={setShowStartDMModal}
         onStartDM={handleStartDM}
+        excludeUserId={user?.uid}
       />
 
       <Sheet open={isFeatureDrawerOpen} onOpenChange={setIsFeatureDrawerOpen}>

@@ -203,11 +203,13 @@ const Index = () => {
   if (currentView === 'chat' && currentRoom && user) {
     return (
       <ChatRoom
+        roomId={currentRoom.id}
         roomName={currentRoom.name}
         roomType={currentRoom.category === 'dm' ? 'dm' : currentRoom.type}
         participants={currentRoom.members.length}
         onBack={handleBackToDashboard}
         currentUser={convertAuthUserToUser(user)}
+        currentUserId={(user as any)?.id || (user as any)?.uid}
         roomImage={'/placeholder.svg'}
         onNextRandomChat={currentRoom.category === 'random' ? handleNextRandomChat : undefined}
       />

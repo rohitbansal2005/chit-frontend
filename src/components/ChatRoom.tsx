@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/apiClient';
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,6 +19,7 @@ import { MuteDurationModal } from "@/components/MuteDurationModal";
 import { MuteCountdown } from "@/components/MuteCountdown";
 import { toast } from "@/hooks/use-toast";
 import { useNavigate } from 'react-router-dom';
+import { io as socketIo } from 'socket.io-client';
 import { 
   Send, 
   Smile, 
@@ -45,11 +46,12 @@ import {
   Timer,
   UserPlus,
   Ban,
+  Flag,
   Eye,
   SkipForward
 } from "lucide-react";
 import { uploadToCloudinary } from "@/lib/cloudinary";
-import { RoomService } from "@/lib/app-data";
+import { FriendService, RoomService, UserService, type ChatRoom as ApiChatRoom } from "@/lib/app-data";
 
 interface Message {
   id: string;
@@ -59,6 +61,7 @@ interface Message {
   avatar: string;
   type: 'text' | 'system' | 'image';
   userId: string;
+  deleted?: boolean;
   attachments?: { url: string; fileName: string; fileSize: number; mimeType: string }[];
   replyTo?: string;
   edited?: boolean;
@@ -140,30 +143,34 @@ interface ChatRoomProps {
   participants: number;
   onBack: () => void;
   currentUser?: User;
+  currentUserId?: string;
   roomImage?: string;
   onNextRandomChat?: () => void; // For random chat functionality
   dmPartnerId?: string;
   dmPartnerName?: string;
   dmPartnerAvatar?: string;
+  dmPartnerIsOnline?: boolean;
 }
 
-export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, currentUser, roomImage, onNextRandomChat, dmPartnerId, dmPartnerName, dmPartnerAvatar }: ChatRoomProps) => {
+export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, currentUser, currentUserId, roomImage, onNextRandomChat, dmPartnerId, dmPartnerName, dmPartnerAvatar, dmPartnerIsOnline }: ChatRoomProps) => {
   const navigate = useNavigate();
+  const makeWelcomeMessage = (name: string): Message => ({
+    id: 'system-welcome',
+    user: 'System',
+    message: `Welcome to ${name}! Be respectful and have fun chatting.`,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    avatar: 'S',
+    type: 'system',
+    userId: 'system',
+    timestamp: Date.now()
+  });
   const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      user: "System",
-      message: `Welcome to ${roomName}! Be respectful and have fun chatting.`,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      avatar: "S",
-      type: "system",
-      userId: "system",
-      timestamp: Date.now()
-    }
+    makeWelcomeMessage(roomName)
   ]);
+  const [sentFriendRequests, setSentFriendRequests] = useState<Record<string, boolean>>({});
   const [newMessage, setNewMessage] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
-  const [typingUsers, setTypingUsers] = useState<{userId: string, userName: string}[]>([]);
+  const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+  const [partnerOnline, setPartnerOnline] = useState<boolean | undefined>(dmPartnerIsOnline);
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -188,13 +195,350 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const [bannedUsers, setBannedUsers] = useState<BannedUser[]>([]);
   const [mutedUsers, setMutedUsers] = useState<MutedUser[]>([]);
   const [pinnedMessages, setPinnedMessages] = useState<Message[]>([]);
+  const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
+  const messagesViewportRef = useRef<HTMLDivElement | null>(null);
+  const isNearBottomRef = useRef(true);
+  const prevMessageCountRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
     const [viewedMap, setViewedMap] = useState<Record<string, number>>({});
     const [previewOpen, setPreviewOpen] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const socketRef = useRef<ReturnType<typeof socketIo> | null>(null);
+  const typingStopTimerRef = useRef<any>(null);
+  const typingEmitTimerRef = useRef<any>(null);
+  const partnerTypingOffTimerRef = useRef<any>(null);
+
+  const effectiveUserId = currentUserId || 'current-user';
+  const isOwnMessage = (msg: Message) => msg.userId === effectiveUserId;
+
+  const [roomDetails, setRoomDetails] = useState<ApiChatRoom | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!roomId) {
+        setRoomDetails(null);
+        return;
+      }
+
+      // Make sure the current user is recorded as a member of the room.
+      // Some navigation paths open the room without calling join first.
+      if (roomType !== 'dm' && effectiveUserId && String(effectiveUserId) !== 'current-user') {
+        try {
+          const joined = await apiClient.post<ApiChatRoom>(`/rooms/${roomId}/join`, { userId: effectiveUserId });
+          if (mounted && joined) {
+            setRoomDetails(joined);
+            return;
+          }
+        } catch {
+          // ignore and fall back to getRoomById
+        }
+      }
+
+      try {
+        const info = await RoomService.getRoomById(roomId);
+        if (!mounted) return;
+        setRoomDetails(info || null);
+      } catch {
+        if (!mounted) return;
+        setRoomDetails(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [effectiveUserId, roomId, roomType]);
+
+  const currentUserRole = useMemo<'owner' | 'admin' | 'member'>(() => {
+    // Default to member until we know the real room ownership/admin lists.
+    if (!roomDetails) return 'member';
+    if (roomDetails.owner && String(roomDetails.owner) === String(effectiveUserId)) return 'owner';
+    if (Array.isArray(roomDetails.admins) && roomDetails.admins.some(a => String(a) === String(effectiveUserId))) return 'admin';
+    return 'member';
+  }, [effectiveUserId, roomDetails]);
+
+  const canManageGroup = roomType !== 'dm' && (currentUserRole === 'owner' || currentUserRole === 'admin');
+
+  const [resolvedGroupMembers, setResolvedGroupMembers] = useState<GroupMember[]>([]);
+
+  useEffect(() => {
+    setPartnerOnline(dmPartnerIsOnline);
+  }, [dmPartnerIsOnline]);
+
+  const getSocketBaseUrl = () => {
+    const base = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:4000/api';
+    return String(base).replace(/\/api\/?$/, '');
+  };
+
+  const updateIsNearBottom = () => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    const thresholdPx = 120;
+    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    isNearBottomRef.current = distanceFromBottom <= thresholdPx;
+  };
+
+  // When switching rooms/DMs, reset per-room UI state so messages don't "stick"
+  useEffect(() => {
+    setMessages([makeWelcomeMessage(roomName)]);
+    setPinnedMessages([]);
+    setReplyingTo(null);
+    setEditingMessage(null);
+    setNewMessage('');
+    setCurrentRoomName(roomName);
+    setCurrentGroupLogo(roomImage);
+    prevMessageCountRef.current = 0;
+    isNearBottomRef.current = true;
+    setIsPartnerTyping(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, roomName]);
+
+  // Socket.IO typing indicator (DM only)
+  useEffect(() => {
+    if (roomType !== 'dm' || !roomId) return;
+
+    // Ensure socket is connected with this user's identity
+    const socket = socketIo(getSocketBaseUrl(), {
+      transports: ['websocket'],
+      query: { userId: String(effectiveUserId) }
+    });
+
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      socket.emit('room:join', { roomId: String(roomId) });
+    });
+
+    const onPresenceUpdate = (payload: any) => {
+      try {
+        const pid = payload?.userId ? String(payload.userId) : '';
+        if (!pid) return;
+        if (dmPartnerId && String(pid) !== String(dmPartnerId)) return;
+        if (!dmPartnerId) return;
+        if (typeof payload?.isOnline !== 'boolean') return;
+        setPartnerOnline(payload.isOnline);
+      } catch (e) {}
+    };
+
+    const onTyping = (payload: any) => {
+      try {
+        if (!payload || String(payload.roomId) !== String(roomId)) return;
+        const fromId = payload.userId ? String(payload.userId) : '';
+        if (fromId && String(fromId) === String(effectiveUserId)) return;
+        setIsPartnerTyping(true);
+        if (partnerTypingOffTimerRef.current) clearTimeout(partnerTypingOffTimerRef.current);
+        partnerTypingOffTimerRef.current = setTimeout(() => setIsPartnerTyping(false), 2000);
+      } catch (e) {}
+    };
+
+    const onTypingStop = (payload: any) => {
+      try {
+        if (!payload || String(payload.roomId) !== String(roomId)) return;
+        const fromId = payload.userId ? String(payload.userId) : '';
+        if (fromId && String(fromId) === String(effectiveUserId)) return;
+        setIsPartnerTyping(false);
+      } catch (e) {}
+    };
+
+    socket.on('room:typing', onTyping);
+    socket.on('room:typing-stop', onTypingStop);
+    socket.on('presence:update', onPresenceUpdate);
+
+    return () => {
+      try {
+        socket.emit('room:leave', { roomId: String(roomId) });
+      } catch (e) {}
+      try { socket.off('room:typing', onTyping); } catch (e) {}
+      try { socket.off('room:typing-stop', onTypingStop); } catch (e) {}
+      try { socket.off('presence:update', onPresenceUpdate); } catch (e) {}
+      try { socket.disconnect(); } catch (e) {}
+      socketRef.current = null;
+      if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+      if (typingEmitTimerRef.current) clearTimeout(typingEmitTimerRef.current);
+      if (partnerTypingOffTimerRef.current) clearTimeout(partnerTypingOffTimerRef.current);
+    };
+  }, [roomId, roomType, effectiveUserId, dmPartnerId]);
+
+  // Track whether the user is near the bottom of the messages viewport.
+  // This prevents polling updates from forcing a scroll while the user is reading older messages.
+  useEffect(() => {
+    const root = messagesScrollAreaRef.current;
+    if (!root) return;
+
+    const viewport = root.querySelector('[data-radix-scroll-area-viewport]') as HTMLDivElement | null;
+    if (!viewport) return;
+
+    messagesViewportRef.current = viewport;
+
+    const onScroll = () => updateIsNearBottom();
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+
+    // Initialize after layout
+    requestAnimationFrame(() => updateIsNearBottom());
+
+    return () => {
+      viewport.removeEventListener('scroll', onScroll);
+      if (messagesViewportRef.current === viewport) {
+        messagesViewportRef.current = null;
+      }
+    };
+    // Re-bind when switching rooms
+  }, [roomId]);
+
+  // Fetch + poll messages from backend when roomId is available
+  const pollerRef = useRef<{ roomId?: string; intervalId?: any } | null>(null);
+  useEffect(() => {
+    if (!roomId) {
+      if (pollerRef.current?.intervalId) {
+        clearInterval(pollerRef.current.intervalId);
+        pollerRef.current = null;
+      }
+      return;
+    }
+
+    // If we are already polling this room, do nothing
+    if (pollerRef.current?.roomId === roomId) return;
+
+    // Clear previous poller
+    if (pollerRef.current?.intervalId) {
+      clearInterval(pollerRef.current.intervalId);
+      pollerRef.current = null;
+    }
+
+    let cancelled = false;
+
+    const mapApiMessage = (m: any): Message => {
+      const ts = new Date(m.timestamp || m.createdAt || Date.now());
+      const senderId = String(m.senderId || '');
+      const senderName = m.senderName || (senderId === String(effectiveUserId) ? (currentUser?.name || 'You') : (dmPartnerName || 'User'));
+      const meta = (m && typeof m === 'object') ? (m.meta || {}) : {};
+      const isDeleted = Boolean(meta?.deleted);
+
+      // Backend stores reactions as [{emoji,userId,...}], UI uses { [emoji]: userId[] }
+      const reactionMap: { [emoji: string]: string[] } = {};
+      const raw = Array.isArray(m.reactions) ? m.reactions : [];
+      for (const r of raw) {
+        const e = r?.emoji ? String(r.emoji) : null;
+        const u = r?.userId ? String(r.userId) : null;
+        if (!e || !u) continue;
+        reactionMap[e] = Array.isArray(reactionMap[e]) ? reactionMap[e] : [];
+        if (!reactionMap[e].includes(u)) reactionMap[e].push(u);
+      }
+
+      return {
+        id: String(m.id || m._id || `${ts.getTime()}`),
+        user: senderName,
+        message: isDeleted ? 'Message deleted' : String(m.content || m.message || m.text || ''),
+        time: ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        avatar: (senderName || 'U').charAt(0).toUpperCase(),
+        type: (m.type as any) || 'text',
+        userId: senderId,
+        replyTo: m.replyTo ? String(m.replyTo) : undefined,
+        edited: Boolean(m.editedAt),
+        deleted: isDeleted,
+        reactions: Object.keys(reactionMap).length ? reactionMap : undefined,
+        timestamp: ts.getTime()
+      };
+    };
+
+    const mergeMessages = (incoming: Message[]) => {
+      setMessages(prev => {
+        const system = prev.filter(p => p.type === 'system');
+        const existing = new Map(prev.filter(p => p.type !== 'system').map(p => [p.id, p]));
+        const merged = [...prev.filter(p => p.type !== 'system')];
+
+        for (const msg of incoming) {
+          if (existing.has(msg.id)) {
+            // Allow updates (deleted/edited/reactions) to flow in via polling
+            const idx = merged.findIndex(p => p.id === msg.id);
+            if (idx !== -1) {
+              const before = merged[idx];
+              const changed = (
+                before.message !== msg.message ||
+                Boolean(before.edited) !== Boolean(msg.edited) ||
+                Boolean(before.deleted) !== Boolean(msg.deleted) ||
+                JSON.stringify(before.reactions || {}) !== JSON.stringify(msg.reactions || {}) ||
+                String(before.replyTo || '') !== String(msg.replyTo || '')
+              );
+              if (changed) merged[idx] = { ...before, ...msg };
+            }
+            continue;
+          }
+
+          // Replace optimistic temp messages if they match content/sender within 5s
+          const matchIndex = merged.findIndex(p => (
+            String(p.id).startsWith('temp-') &&
+            p.userId === msg.userId &&
+            p.message === msg.message &&
+            Math.abs((p.timestamp || 0) - (msg.timestamp || 0)) < 5000
+          ));
+
+          if (matchIndex !== -1) {
+            merged[matchIndex] = msg;
+          } else {
+            merged.push(msg);
+          }
+        }
+
+        merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+        // Ensure we always have exactly one welcome system message
+        const welcome = {
+          id: 'system-welcome',
+          user: 'System',
+          message: `Welcome to ${roomName}! Be respectful and have fun chatting.`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          avatar: 'S',
+          type: 'system' as const,
+          userId: 'system',
+          timestamp: Date.now()
+        };
+        return [welcome, ...merged];
+      });
+    };
+
+    const fetchMessages = async () => {
+      try {
+        const resp: any[] = await apiClient.get(`/rooms/${roomId}/messages`, { limit: 100 });
+        const incoming = (resp || []).map(mapApiMessage);
+        if (!cancelled) mergeMessages(incoming);
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    const shouldPollNow = () => {
+      try {
+        if (typeof document !== 'undefined' && document.hidden) return false;
+        // @ts-ignore
+        if (typeof window !== 'undefined' && window?.document && typeof window.document.hasFocus === 'function') {
+          // @ts-ignore
+          if (!window.document.hasFocus()) return false;
+        }
+      } catch (e) {}
+      return true;
+    };
+
+    // Initial fetch + poll every 3s
+    fetchMessages();
+    const intervalId = setInterval(() => {
+      if (!shouldPollNow()) return;
+      fetchMessages();
+    }, 3000);
+
+    pollerRef.current = { roomId, intervalId };
+
+    return () => {
+      cancelled = true;
+      if (pollerRef.current?.intervalId) {
+        clearInterval(pollerRef.current.intervalId);
+        pollerRef.current = null;
+      }
+    };
+  }, [roomId, roomName, dmPartnerName, currentUser?.name, effectiveUserId]);
 
   // Group settings and members
   const [groupSettings, setGroupSettings] = useState<GroupSettings>({
@@ -210,34 +554,150 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     }
   });
 
-  const initialMembers: GroupMember[] = [];
-  initialMembers.push({
-    id: "current-user",
-    name: currentUser?.name || "You",
-    avatar: currentUser?.name?.charAt(0).toUpperCase() || "Y",
-    role: "owner",
-    joinedDate: new Date().toLocaleDateString(),
-    status: "online"
-  });
-  if (dmPartnerId) {
-    initialMembers.push({
-      id: dmPartnerId,
-      name: dmPartnerName || "Participant",
-      avatar: (dmPartnerAvatar && dmPartnerAvatar.split('/').pop()?.charAt(0).toUpperCase()) || (dmPartnerName ? dmPartnerName.charAt(0).toUpperCase() : 'P'),
-      role: 'member',
-      joinedDate: new Date().toLocaleDateString(),
-      status: 'online'
-    });
-  }
-  const [groupMembers] = useState<GroupMember[]>(initialMembers);
+  useEffect(() => {
+    let mounted = true;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const buildMembers = async () => {
+      // For DM rooms we keep the lightweight local list.
+      if (roomType === 'dm') {
+        setResolvedGroupMembers([]);
+        return;
+      }
+
+      if (!roomDetails) {
+        setResolvedGroupMembers([
+          {
+            id: effectiveUserId,
+            name: currentUser?.name || 'You',
+            avatar: (currentUser?.name || 'You').charAt(0).toUpperCase(),
+            role: currentUserRole,
+            joinedDate: new Date().toLocaleDateString(),
+            status: 'online'
+          }
+        ]);
+        return;
+      }
+
+      const rawIds = (roomDetails.members || roomDetails.participants || []) as any[];
+      const ids = Array.from(new Set([...(rawIds || []).map((x) => String(x)).filter(Boolean), String(effectiveUserId)]));
+
+      const ownerId = roomDetails.owner ? String(roomDetails.owner) : '';
+      const adminSet = new Set((roomDetails.admins || []).map((x: any) => String(x)));
+
+      const results = await Promise.allSettled(
+        ids.map(async (id) => {
+          if (String(id) === String(effectiveUserId)) {
+            return {
+              id,
+              name: currentUser?.name || 'You',
+              isOnline: true,
+              userType: undefined as any
+            };
+          }
+          const u = await UserService.getUserById(id);
+          return u;
+        })
+      );
+
+      const members: GroupMember[] = results
+        .map((r, idx) => {
+          const id = ids[idx];
+          const u: any = r.status === 'fulfilled' ? r.value : null;
+          const name = u?.displayName || u?.username || u?.name || (String(id) === String(effectiveUserId) ? (currentUser?.name || 'You') : 'User');
+          const avatarLetter = (name ? String(name).charAt(0).toUpperCase() : 'U');
+          const isOnline = !!u?.isOnline;
+          const role: GroupMember['role'] = ownerId && String(id) === ownerId ? 'owner' : adminSet.has(String(id)) ? 'admin' : 'member';
+          const status: GroupMember['status'] = isOnline ? 'online' : 'offline';
+          return {
+            id: String(id),
+            name,
+            avatar: avatarLetter,
+            role,
+            joinedDate: new Date().toLocaleDateString(),
+            status,
+            isPremium: u?.userType === 'premium'
+          } as GroupMember;
+        })
+        // Keep owner/admin on top
+        .sort((a, b) => {
+          const rank = (m: GroupMember) => (m.role === 'owner' ? 0 : m.role === 'admin' ? 1 : 2);
+          const dr = rank(a) - rank(b);
+          if (dr !== 0) return dr;
+          return a.name.localeCompare(b.name);
+        });
+
+      if (!mounted) return;
+      setResolvedGroupMembers(members);
+    };
+
+    buildMembers();
+    return () => {
+      mounted = false;
+    };
+  }, [currentUser?.name, currentUserRole, effectiveUserId, roomDetails, roomType]);
+
+  const groupMembers = useMemo<GroupMember[]>(() => {
+    if (roomType === 'dm') {
+      const list: GroupMember[] = [
+        {
+          id: effectiveUserId,
+          name: currentUser?.name || 'You',
+          avatar: (currentUser?.name || 'You').charAt(0).toUpperCase(),
+          role: currentUserRole,
+          joinedDate: new Date().toLocaleDateString(),
+          status: 'online'
+        }
+      ];
+
+      if (dmPartnerId) {
+        list.push({
+          id: dmPartnerId,
+          name: dmPartnerName || 'Participant',
+          avatar: (dmPartnerName ? dmPartnerName.charAt(0).toUpperCase() : 'P'),
+          role: 'member',
+          joinedDate: new Date().toLocaleDateString(),
+          status: dmPartnerIsOnline ? 'online' : 'offline'
+        });
+      }
+
+      return list;
+    }
+
+    return resolvedGroupMembers.length
+      ? resolvedGroupMembers
+      : [
+          {
+            id: effectiveUserId,
+            name: currentUser?.name || 'You',
+            avatar: (currentUser?.name || 'You').charAt(0).toUpperCase(),
+            role: currentUserRole,
+            joinedDate: new Date().toLocaleDateString(),
+            status: 'online'
+          }
+        ];
+  }, [currentUser?.name, currentUserRole, dmPartnerId, dmPartnerIsOnline, dmPartnerName, effectiveUserId, resolvedGroupMembers, roomType]);
+
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
+  // Smart auto-scroll: only scroll when a new message is appended AND the user is already near bottom,
+  // or when the newly appended message is sent by the current user.
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const currentCount = messages.length;
+    const prevCount = prevMessageCountRef.current;
+    prevMessageCountRef.current = currentCount;
+
+    if (currentCount <= 0) return;
+
+    const appended = currentCount > prevCount;
+    if (!appended) return;
+
+    const last = messages[currentCount - 1];
+    if (isNearBottomRef.current || isOwnMessage(last)) {
+      scrollToBottom("smooth");
+    }
+  }, [messages.length]);
 
   // Initialize pinned messages from existing messages
   useEffect(() => {
@@ -283,9 +743,6 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       if (recordingTimerRef.current) {
         clearInterval(recordingTimerRef.current);
       }
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-      }
     };
   }, [mediaRecorder]);
 
@@ -313,30 +770,81 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     if (!newMessage.trim() || isRecording) return;
 
     if (editingMessage) {
-      setMessages(prev => prev.map(msg => 
-        msg.id === editingMessage 
-          ? { ...msg, message: newMessage.trim(), edited: true }
-          : msg
-      ));
+      const messageId = editingMessage;
+      const nextText = newMessage.trim();
+
+      // Optimistic UI update
+      const previous = messages.find(m => m.id === messageId);
+      setMessages(prev => prev.map(msg => (msg.id === messageId ? { ...msg, message: nextText, edited: true } : msg)));
       setEditingMessage(null);
-      toast({ title: "Message updated" });
+
+      if (!String(messageId).startsWith('temp-')) {
+        (async () => {
+          try {
+            await apiClient.patch(`/messages/${messageId}`, { content: nextText });
+            toast({ title: 'Message updated' });
+          } catch (err: any) {
+            // rollback if server update failed
+            if (previous) {
+              setMessages(prev => prev.map(m => (m.id === messageId ? previous : m)));
+            }
+            toast({
+              title: 'Update failed',
+              description: err?.message || 'Please try again.',
+              variant: 'destructive'
+            });
+          }
+        })();
+      } else {
+        toast({ title: 'Message updated' });
+      }
     } else {
+      const outgoingText = newMessage.trim();
+      const tempId = `temp-${Date.now()}`;
+      const now = Date.now();
       const message: Message = {
-        id: Date.now().toString(),
+        id: tempId,
         user: currentUser?.name || "You",
-        message: newMessage.trim(),
+        message: outgoingText,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         avatar: currentUser?.avatar || currentUser?.name?.charAt(0).toUpperCase() || "Y",
         type: "text",
-        userId: "current-user",
-        userRole: "owner", // Current user is owner
-        userIsPremium: false, // Can be dynamic based on user subscription
+        userId: effectiveUserId,
+        userRole: "owner",
+        userIsPremium: false,
         replyTo: replyingTo || undefined,
-        timestamp: Date.now()
+        timestamp: now
       };
       setMessages(prev => [...prev, message]);
-      
-      // No simulated responses; real app should rely on server messages
+
+      if (roomId) {
+        (async () => {
+          try {
+            const saved: any = await apiClient.post(`/rooms/${roomId}/messages`, {
+              senderId: effectiveUserId,
+              senderName: currentUser?.name || 'You',
+              content: outgoingText,
+              type: 'text',
+              replyTo: replyingTo || undefined
+            });
+
+            const savedId = String(saved?.id || saved?._id || tempId);
+            const savedTs = new Date(saved?.timestamp || Date.now()).getTime();
+            setMessages(prev => prev.map(m => {
+              if (m.id !== tempId) return m;
+              return { ...m, id: savedId, timestamp: savedTs };
+            }));
+          } catch (err: any) {
+            // remove optimistic message if send failed
+            setMessages(prev => prev.filter(m => m.id !== tempId));
+            toast({
+              title: 'Message not sent',
+              description: err?.message || 'Please try again.',
+              variant: 'destructive'
+            });
+          }
+        })();
+      }
     }
 
     setNewMessage("");
@@ -353,7 +861,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
 
   const handleEdit = (messageId: string) => {
     const message = messages.find(m => m.id === messageId);
-    if (message && message.userId === "current-user") {
+    if (message && message.userId === effectiveUserId) {
       setEditingMessage(messageId);
       setNewMessage(message.message);
       toast({ title: "Editing message" });
@@ -361,8 +869,33 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleDelete = (messageId: string) => {
-    setMessages(prev => prev.filter(m => m.id !== messageId));
-    toast({ title: "Message deleted", variant: "destructive" });
+    const previous = messages;
+
+    // DM: show placeholder instead of removing bubble
+    if (roomType === 'dm') {
+      setMessages(prev => prev.map(m => (m.id === messageId ? { ...m, message: 'Message deleted', deleted: true } : m)));
+    } else {
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+    }
+
+    if (String(messageId).startsWith('temp-')) {
+      toast({ title: 'Message deleted', variant: 'destructive' });
+      return;
+    }
+
+    (async () => {
+      try {
+        await apiClient.delete(`/messages/${messageId}`);
+        toast({ title: 'Message deleted', variant: 'destructive' });
+      } catch (err: any) {
+        setMessages(previous);
+        toast({
+          title: 'Delete failed',
+          description: err?.message || 'Please try again.',
+          variant: 'destructive'
+        });
+      }
+    })();
   };
 
   const handleReport = (messageId: string) => {
@@ -377,8 +910,26 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     }
   };
 
+  const handleReportUser = (userId: string, userName: string) => {
+    setReportTarget({
+      messageId: '',
+      userId,
+      userName
+    });
+    setShowReportModal(true);
+  };
+
   const handleBlock = (userId: string) => {
-    toast({ title: "User blocked", description: "You won't see messages from this user anymore." });
+    (async () => {
+      try {
+        await UserService.blockUser(effectiveUserId, userId);
+        toast({ title: 'User blocked', description: "You won't see messages from this user anymore.", variant: 'destructive' });
+        // If you're in a DM with this user, close it.
+        try { onBack?.(); } catch (e) {}
+      } catch (err: any) {
+        toast({ title: 'Block failed', description: err?.message || 'Please try again.', variant: 'destructive' });
+      }
+    })();
   };
 
   const handleStartDM = (userId: string) => {
@@ -386,7 +937,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     const userName = message?.user || "User";
     
     // Don't DM yourself
-    if (userId === 'current-user') {
+    if (userId === effectiveUserId) {
       toast({
         title: "Cannot DM yourself",
         description: "You cannot send a direct message to yourself.",
@@ -416,7 +967,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     const userName = message?.user || "User";
     
     // Don't mention yourself
-    if (userId === 'current-user') {
+    if (userId === effectiveUserId) {
       return;
     }
     
@@ -465,15 +1016,76 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const handleAddFriend = (userId: string) => {
     const user = groupMembers.find(m => m.id === userId);
     const userName = user?.name || "User";
-    
-    toast({
-      title: "Friend Request Sent",
-      description: `Sent friend request to ${userName}`,
-      duration: 2000
-    });
-    
-    // TODO: Implement actual friend request logic
-    console.log(`Adding friend: ${userId} (${userName})`);
+
+    (async () => {
+      try {
+        if (sentFriendRequests[String(userId)]) {
+          toast({ title: 'Already sent', description: `Friend request already sent to ${userName}`, duration: 2000 });
+          return;
+        }
+
+        const resp = await FriendService.sendFriendRequest(effectiveUserId, userId);
+        const msg = (resp?.message || '').toLowerCase();
+        if (msg.includes('already friends')) {
+          toast({ title: 'Already friends', description: `You and ${userName} are already friends.`, duration: 2000 });
+          return;
+        }
+        if (msg.includes('already') || msg.includes('pending')) {
+          setSentFriendRequests(prev => ({ ...prev, [String(userId)]: true }));
+          toast({ title: 'Already sent', description: `Friend request already sent to ${userName}`, duration: 2000 });
+          return;
+        }
+
+        setSentFriendRequests(prev => ({ ...prev, [String(userId)]: true }));
+        toast({
+          title: 'Friend Request Sent',
+          description: `Sent friend request to ${userName}`,
+          duration: 2000
+        });
+      } catch (e: any) {
+        toast({
+          title: 'Could not send request',
+          description: e?.message || 'Please try again.',
+          variant: 'destructive'
+        });
+      }
+    })();
+  };
+
+  const handleAddFriendByIdAndName = (userId: string, userName: string) => {
+    (async () => {
+      try {
+        if (sentFriendRequests[String(userId)]) {
+          toast({ title: 'Already sent', description: `Friend request already sent to ${userName || 'User'}`, duration: 2000 });
+          return;
+        }
+
+        const resp = await FriendService.sendFriendRequest(effectiveUserId, userId);
+        const msg = (resp?.message || '').toLowerCase();
+        if (msg.includes('already friends')) {
+          toast({ title: 'Already friends', description: `You and ${userName || 'User'} are already friends.`, duration: 2000 });
+          return;
+        }
+        if (msg.includes('already') || msg.includes('pending')) {
+          setSentFriendRequests(prev => ({ ...prev, [String(userId)]: true }));
+          toast({ title: 'Already sent', description: `Friend request already sent to ${userName || 'User'}`, duration: 2000 });
+          return;
+        }
+
+        setSentFriendRequests(prev => ({ ...prev, [String(userId)]: true }));
+        toast({
+          title: 'Friend Request Sent',
+          description: `Sent friend request to ${userName || 'User'}`,
+          duration: 2000
+        });
+      } catch (e: any) {
+        toast({
+          title: 'Could not send request',
+          description: e?.message || 'Please try again.',
+          variant: 'destructive'
+        });
+      }
+    })();
   };
 
   const handleBlockUser = (userId: string) => {
@@ -621,15 +1233,6 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       description: `${user?.name || "User"} can now send messages`,
       duration: 2000
     });
-  };
-
-  const handleReportUser = (userId: string, userName: string) => {
-    setReportTarget({
-      messageId: 'user-report',
-      userId,
-      userName
-    });
-    setShowReportModal(true);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -793,8 +1396,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       return;
     }
     
-    const currentUserId = "current-user";
+    const currentUserId = effectiveUserId;
+    const wasReacted = !!messages.find(m => m.id === messageId)?.reactions?.[emoji]?.includes(currentUserId);
     
+    // optimistic toggle
     setMessages(prev => prev.map(msg => {
       if (msg.id === messageId) {
         const reactions = { ...(msg.reactions || {}) };
@@ -821,6 +1426,22 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       }
       return msg;
     }));
+
+    // persist reaction to backend (skip optimistic temp messages)
+    if (!String(messageId).startsWith('temp-')) {
+      (async () => {
+        try {
+          if (wasReacted) {
+            await apiClient.delete(`/messages/${messageId}/reactions?emoji=${encodeURIComponent(emoji)}`);
+          } else {
+            await apiClient.post(`/messages/${messageId}/reactions`, { emoji });
+          }
+        } catch (err: any) {
+          // If persistence fails, we keep optimistic UI but notify
+          toast({ title: 'Reaction not saved', description: err?.message || 'Please try again.', variant: 'destructive', duration: 2000 });
+        }
+      })();
+    }
 
     toast({
       title: "Reaction added",
@@ -892,10 +1513,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     console.log(`Removing member ${memberId}`);
   };
 
-  const getCurrentUserRole = (): 'owner' | 'admin' | 'member' => {
-    const currentMember = groupMembers.find(m => m.id === 'current-user');
-    return currentMember?.role || 'member';
-  };
+  const getCurrentUserRole = (): 'owner' | 'admin' | 'member' => currentUserRole;
 
   const isCurrentUserMuted = () => {
     const currentUserId = 'current-user';
@@ -1131,6 +1749,11 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     onBack();
   };
 
+  const handleCloseDM = () => {
+    // DM close should only close the interface (no leave-room message)
+    onBack();
+  };
+
   const handleShareRoom = () => {
     const roomLink = `${window.location.origin}/room/${roomName}`;
     navigator.clipboard.writeText(roomLink);
@@ -1138,6 +1761,22 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleClearAllMessages = () => {
+    // DM: clear-for-me (DB-backed) so refresh doesn't bring them back.
+    if (roomType === 'dm') {
+      if (!roomId) return;
+      (async () => {
+        try {
+          await apiClient.post(`/rooms/${roomId}/messages/clear-for-me`, {});
+          setMessages([makeWelcomeMessage(roomName)]);
+          toast({ title: 'Messages cleared', description: 'Cleared for you' });
+        } catch (e: any) {
+          toast({ title: 'Clear failed', description: e?.message || 'Please try again.', variant: 'destructive' });
+        }
+      })();
+      return;
+    }
+
+    // Group: only staff
     if (getCurrentUserRole() === 'owner' || getCurrentUserRole() === 'admin') {
       setMessages([{
         id: "system-clear",
@@ -1159,51 +1798,34 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     }
   };
 
-  // Typing indicator functions
-  const handleTypingStart = () => {
-    // Simulate sending typing status to other users
-    if (!isTyping) {
-      setIsTyping(true);
-      
-      // Add other users typing (simulation)
-      const otherTypingUsers = [
-        { userId: 'user-alice', userName: 'Alice' },
-        { userId: 'user-bob', userName: 'Bob' }
-      ];
-      
-      // Randomly show someone else typing occasionally
-      if (Math.random() > 0.7) {
-        const randomUser = otherTypingUsers[Math.floor(Math.random() * otherTypingUsers.length)];
-        setTypingUsers(prev => {
-          const exists = prev.find(u => u.userId === randomUser.userId);
-          if (!exists) {
-            return [...prev, randomUser];
-          }
-          return prev;
-        });
-        
-        // Stop their typing after 2-4 seconds
-        setTimeout(() => {
-          setTypingUsers(prev => prev.filter(u => u.userId !== randomUser.userId));
-        }, Math.random() * 2000 + 2000);
-      }
-    }
-  };
-
-  const handleTypingStop = () => {
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
-    
-    typingTimeoutRef.current = setTimeout(() => {
-      setIsTyping(false);
-    }, 1000);
-  };
-
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setNewMessage(e.target.value);
-    handleTypingStart();
-    handleTypingStop();
+
+    // Emit typing events in DM only
+    if (roomType === 'dm' && roomId && socketRef.current) {
+      // throttle emit so we don't spam
+      if (!typingEmitTimerRef.current) {
+        socketRef.current.emit('room:typing', {
+          roomId: String(roomId),
+          userId: String(effectiveUserId),
+          userName: currentUser?.name || 'User'
+        });
+        typingEmitTimerRef.current = setTimeout(() => {
+          typingEmitTimerRef.current = null;
+        }, 700);
+      }
+
+      if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+      typingStopTimerRef.current = setTimeout(() => {
+        try {
+          socketRef.current?.emit('room:typing-stop', {
+            roomId: String(roomId),
+            userId: String(effectiveUserId),
+            userName: currentUser?.name || 'User'
+          });
+        } catch (e) {}
+      }, 1200);
+    }
   };
 
   // Filter members based on search query
@@ -1251,11 +1873,24 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
               <div className="min-w-0 flex-1">
                 <h2 className="font-semibold text-base md:text-lg truncate">{currentRoomName}</h2>
                 <div className="flex items-center gap-1 md:gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse flex-shrink-0"></div>
+                  <div
+                    className={
+                      "w-2 h-2 rounded-full flex-shrink-0 " +
+                      (roomType === 'dm'
+                        ? ((isPartnerTyping || partnerOnline === true)
+                          ? 'bg-green-500 animate-pulse'
+                          : 'bg-muted-foreground/40')
+                        : 'bg-green-500 animate-pulse')
+                    }
+                  ></div>
                   <span className="text-xs md:text-sm text-muted-foreground truncate">
                       {roomType === 'dm' ? (
-                        'Private direct message'
-                      ) : (roomType !== 'dm' && groupSettings.groupDescription ? 
+                        (isPartnerTyping
+                          ? 'Typing…'
+                          : (typeof partnerOnline === 'boolean'
+                            ? (partnerOnline ? 'Online' : 'Offline')
+                            : 'Direct message'))
+                      ) : (groupSettings.groupDescription ? 
                         (groupSettings.groupDescription.length > 40 ? 
                           groupSettings.groupDescription.substring(0, 40) + "..." : 
                           groupSettings.groupDescription
@@ -1305,7 +1940,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                   <FileText className="w-4 h-4" />
                 </Button>
               )}
-              {roomType !== 'dm' && (getCurrentUserRole() === 'owner' || getCurrentUserRole() === 'admin') && (
+              {roomType !== 'dm' && canManageGroup && (
                 <Button 
                   variant="ghost" 
                   size="sm"
@@ -1331,8 +1966,6 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                     <>
                       <DropdownMenuItem onClick={() => setShowGroupRules(true)}>
                         <FileText className="w-4 h-4 mr-2" />
-
-                // Preview dialog at end of file (rendered by ChatRoom via state)
                         Group Info
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={handleShareRoom}>
@@ -1344,7 +1977,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                   )}
                   
                   {/* Staff options (Admin & Owner) - only in group rooms */}
-                  {roomType !== 'dm' && (getCurrentUserRole() === 'owner' || getCurrentUserRole() === 'admin') && (
+                  {roomType !== 'dm' && canManageGroup && (
                     <>
                       <DropdownMenuItem onClick={handleClearAllMessages}>
                         <Trash2 className="w-4 h-4 mr-2" />
@@ -1355,7 +1988,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                   )}
                   
                   {/* Owner only options - only in group rooms */}
-                  {roomType !== 'dm' && getCurrentUserRole() === 'owner' && (
+                  {roomType !== 'dm' && currentUserRole === 'owner' && (
                     <>
                       <DropdownMenuItem 
                         onClick={handleDeleteRoom}
@@ -1370,7 +2003,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                   
                   {/* Leave room for all users - different text for DM vs Group */}
                   <DropdownMenuItem 
-                    onClick={handleLeaveRoom}
+                    onClick={roomType === 'dm' ? handleCloseDM : handleLeaveRoom}
                     className="text-red-600 focus:text-red-600"
                   >
                     <LogOut className="w-4 h-4 mr-2" />
@@ -1380,11 +2013,22 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                   {/* DM-specific options */}
                   {roomType === 'dm' && (
                     <>
-                      <DropdownMenuItem onClick={() => handleViewProfile(dmPartner.id)}>
+                      <DropdownMenuItem onClick={() => dmPartner.id ? handleViewProfile(dmPartner.id) : null}>
                         <Eye className="w-4 h-4 mr-2" />
                         View Profile
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockUser(dmPartner.id)} className="text-red-600 focus:text-red-600">
+                      <DropdownMenuItem
+                        disabled={!!(dmPartner.id && sentFriendRequests[String(dmPartner.id)])}
+                        onClick={() => (dmPartner.id ? handleAddFriendByIdAndName(dmPartner.id, dmPartner.name || 'User') : null)}
+                      >
+                        <UserPlus className="w-4 h-4 mr-2" />
+                        {dmPartner.id && sentFriendRequests[String(dmPartner.id)] ? 'Request Sent' : 'Add Friend'}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => (dmPartner.id ? handleReportUser(dmPartner.id, dmPartner.name || 'User') : null)} className="text-orange-600 focus:text-orange-600">
+                        <Flag className="w-4 h-4 mr-2" />
+                        Report User
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => dmPartner.id ? handleBlock(dmPartner.id) : null} className="text-red-600 focus:text-red-600">
                         <Ban className="w-4 h-4 mr-2" />
                         Block User
                       </DropdownMenuItem>
@@ -1432,6 +2076,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
 
         {/* Messages */}
         <ScrollArea 
+          ref={messagesScrollAreaRef}
           className="flex-1 px-3 md:px-4 relative touch-pan-y"
           style={{
             backgroundImage: groupSettings.groupWallpaper ? `url(${groupSettings.groupWallpaper})` : undefined,
@@ -1455,21 +2100,21 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                     </div>
                   </div>
                 ) : (
-                  <div className={`group flex gap-2 md:gap-3 ${msg.userId === 'current-user' ? 'flex-row-reverse' : ''}`}>
+                  <div className={`group flex gap-2 md:gap-3 ${isOwnMessage(msg) ? 'flex-row-reverse' : ''}`}>
                     <Avatar 
                       className={`w-7 h-7 md:w-8 md:h-8 mt-1 flex-shrink-0 transition-all ${
-                        msg.userId !== 'current-user' 
+                        !isOwnMessage(msg)
                           ? 'cursor-pointer hover:ring-2 hover:ring-primary hover:shadow-md' 
                           : ''
                       }`}
                       onClick={() => {
-                        if (msg.userId !== 'current-user') {
+                        if (!isOwnMessage(msg)) {
                           handleStartDM(msg.userId);
                         }
                       }}
-                      title={msg.userId !== 'current-user' ? `Click to DM ${msg.user}` : undefined}
+                      title={!isOwnMessage(msg) ? `Click to DM ${msg.user}` : undefined}
                     >
-                      {msg.userId === 'current-user' && currentUser?.avatar && (
+                      {isOwnMessage(msg) && currentUser?.avatar && (
                         <AvatarImage src={currentUser.avatar} alt={currentUser.name || 'User'} />
                       )}
                       <AvatarFallback className="bg-primary text-primary-foreground text-xs">
@@ -1477,8 +2122,8 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                       </AvatarFallback>
                     </Avatar>
                     
-                    <div className={`flex-1 max-w-[90%] md:max-w-[70%] ${msg.userId === 'current-user' ? 'text-right' : ''}`}>
-                      {msg.userId !== 'current-user' && (
+                    <div className={`flex-1 max-w-[90%] md:max-w-[70%] ${isOwnMessage(msg) ? 'text-right' : ''}`}>
+                      {!isOwnMessage(msg) && (
                         <div className="flex items-center gap-2 mb-1 justify-between">
                           <div className="flex items-center gap-2 min-w-0">
                             <div className="flex items-center gap-2 min-w-0">
@@ -1527,7 +2172,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                           <div className="flex-shrink-0">
                             <MessageActions
                               messageId={msg.id}
-                              isOwnMessage={msg.userId === 'current-user'}
+                              isOwnMessage={isOwnMessage(msg)}
                               onReply={handleReply}
                               onEdit={handleEdit}
                               onDelete={handleDelete}
@@ -1566,7 +2211,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                       
                       <div 
                         className={`message-bubble rounded-2xl px-2 md:px-4 py-2 text-sm md:text-base relative smooth-transition transition-all duration-200 ${
-                          msg.userId === 'current-user' 
+                          isOwnMessage(msg)
                             ? 'bg-primary text-primary-foreground ml-auto' 
                             : 'bg-muted'
                         } ${msg.pinned ? 'border-l-4 border-yellow-500' : ''}`}
@@ -1607,7 +2252,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                           </div>
                         )}
                         {msg.message}
-                        {msg.userId === 'current-user' && (
+                        {isOwnMessage(msg) && (
                           <div className="absolute -right-2 top-1/2 -translate-y-1/2">
                             <MessageActions
                               messageId={msg.id}
@@ -1645,7 +2290,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                               key={emoji}
                               onClick={() => handleReaction(msg.id, emoji)}
                               className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs transition-all duration-200 reaction-badge ${
-                                users.includes('current-user')
+                                users.includes(effectiveUserId)
                                   ? 'bg-primary/20 text-primary border border-primary/30'
                                   : 'bg-muted hover:bg-muted/80 border border-muted-foreground/20'
                               }`}
@@ -1658,7 +2303,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                         </div>
                       )}
                       
-                      {msg.userId === 'current-user' && (
+                      {isOwnMessage(msg) && (
                         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground mt-1 mr-2">
                           <div className="flex items-center gap-1">
                             {roomType !== 'dm' && msg.userRole === 'owner' && (
@@ -1701,31 +2346,6 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
               </div>
             ))}
 
-            {/* Typing Indicator */}
-            {typingUsers.length > 0 && (
-              <div className="space-y-2">
-                {typingUsers.map((user) => (
-                  <div key={user.userId} className="flex gap-2 md:gap-3 animate-slide-up">
-                    <Avatar className="w-7 h-7 md:w-8 md:h-8 mt-1 flex-shrink-0">
-                      <AvatarFallback className="bg-primary text-primary-foreground text-xs">
-                        {user.userName.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="bg-muted rounded-2xl px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground">{user.userName} is typing</span>
-                        <div className="flex items-center gap-1">
-                          <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-typing"></div>
-                          <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-typing" style={{ animationDelay: '0.2s' }}></div>
-                          <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-typing" style={{ animationDelay: '0.4s' }}></div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
@@ -2020,13 +2640,13 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                         <div className="text-xs text-muted-foreground">Online</div>
                       </div>
                       <div className="flex items-center gap-1">
-                        {member.id === 'current-user' && (
+                        {String(member.id) === String(effectiveUserId) && (
                           <Badge variant="outline" className="text-xs">You</Badge>
                         )}
                         <UserActionsMenu
                           userId={member.id}
                           userName={member.name}
-                          isCurrentUser={member.id === 'current-user'}
+                          isCurrentUser={String(member.id) === String(effectiveUserId)}
                           onViewProfile={handleViewProfile}
                           onStartDM={handleStartDM}
                           onAddFriend={handleAddFriend}
@@ -2092,7 +2712,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                           <UserActionsMenu
                             userId={member.id}
                             userName={member.name}
-                            isCurrentUser={member.id === 'current-user'}
+                            isCurrentUser={String(member.id) === String(effectiveUserId)}
                             onViewProfile={handleViewProfile}
                             onStartDM={handleStartDM}
                             onAddFriend={handleAddFriend}
@@ -2120,7 +2740,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       )}
       
       {/* Group Settings Modal */}
-      {showGroupSettings && roomType !== 'dm' && (
+      {showGroupSettings && roomType !== 'dm' && canManageGroup && (
         <GroupSettingsModal
           groupName={currentRoomName}
           groupSettings={groupSettings}

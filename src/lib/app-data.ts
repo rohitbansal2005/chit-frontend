@@ -7,6 +7,7 @@ export interface AppUser {
   displayName: string;
   username?: string;
   email: string;
+  avatar?: string;
   photoURL?: string;
   userType: 'guest' | 'registered' | 'premium';
   isOnline: boolean;
@@ -14,10 +15,15 @@ export interface AppUser {
   createdAt: Date | string;
   updatedAt: Date | string;
   bio?: string;
+  age?: number;
+  gender?: string;
+  location?: string;
+  dob?: Date | string | null;
   country?: string;
   language?: string;
   friends?: string[];
   blockedUsers?: string[];
+  settings?: any;
   preferences?: {
     theme: 'light' | 'dark' | 'system';
     notifications: boolean;
@@ -28,6 +34,7 @@ export interface AppUser {
 export interface ChatRoom {
   id: string;
   name: string;
+  displayName?: string;
   description?: string;
   type: 'public' | 'private' | 'dm';
   owner: string;
@@ -37,6 +44,7 @@ export interface ChatRoom {
   admins?: string[];
   moderators?: string[];
   settings?: any;
+  createdBySystem?: boolean;
   bannedUsers?: string[];
   mutedUsers?: { userId: string; until: Date | string }[];
   maxParticipants?: number;
@@ -45,6 +53,7 @@ export interface ChatRoom {
   updatedAt: Date | string;
   lastActivity: Date | string;
   messageCount: number;
+  memberCount?: number;
   category?: string;
   tags?: string[];
   roomImage?: string;
@@ -95,7 +104,7 @@ export class UserService {
     return userId;
   }
 
-  static async updateUser(userId: string, updates: Partial<AppUser>) {
+  static async updateUser(userId: string, updates: any) {
     await apiClient.patch(`/users/${userId}`, updates);
   }
 
@@ -135,10 +144,20 @@ export class UserService {
 
   static async blockUser(userId: string, blockedUserId: string) {
     await apiClient.post(`/users/${userId}/block`, { blockedUserId });
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('chitz:blocked-users-updated'));
+      }
+    } catch (e) {}
   }
 
   static async unblockUser(userId: string, unblockedUserId: string) {
     await apiClient.post(`/users/${userId}/unblock`, { unblockedUserId });
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('chitz:blocked-users-updated'));
+      }
+    } catch (e) {}
   }
   
   static async reportUser(reporterId: string, targetId: string, reason?: string) {
@@ -201,6 +220,14 @@ export class RoomService {
     const room = await apiClient.post<ChatRoom>('/rooms/random', { userId, preferences });
     return room.id;
   }
+
+  static async deleteRoom(roomId: string) {
+    await apiClient.delete(`/rooms/${roomId}`);
+  }
+
+  static async hideRoom(roomId: string) {
+    await apiClient.post(`/rooms/${roomId}/hide`, {});
+  }
 }
 
 export class MessageService {
@@ -247,9 +274,21 @@ export class MessageService {
 }
 
 export class FriendService {
-  static async sendFriendRequest(senderId: string, receiverId: string, message?: string): Promise<string> {
-    const req = await apiClient.post<FriendRequest>('/friends/requests', { senderId, receiverId, message });
-    return req.id;
+  static async sendFriendRequest(
+    senderId: string,
+    receiverId: string,
+    message?: string
+  ): Promise<{ id?: string; message?: string; status?: string; fromUserId?: string; toUserId?: string }> {
+    // Backend derives sender from auth; we still pass senderId for compatibility.
+    const resp = await apiClient.post<any>('/friends/requests', { senderId, receiverId, message });
+    if (!resp || typeof resp !== 'object') return { message: 'unknown response' };
+    return {
+      id: resp.id ? String(resp.id) : undefined,
+      message: resp.message ? String(resp.message) : undefined,
+      status: resp.status ? String(resp.status) : undefined,
+      fromUserId: resp.fromUserId ? String(resp.fromUserId) : undefined,
+      toUserId: resp.toUserId ? String(resp.toUserId) : undefined
+    };
   }
 
   static async acceptFriendRequest(requestId: string) {
@@ -268,9 +307,9 @@ export class FriendService {
     await apiClient.post(`/users/${userId}/friends/remove`, { friendId });
   }
 
-  static async getUserFriendRequests(userId: string): Promise<FriendRequest[]> {
+  static async getUserFriendRequests(_userId?: string): Promise<FriendRequest[]> {
     try {
-      return await apiClient.get<FriendRequest[]>('/friends/requests', { userId });
+      return await apiClient.get<FriendRequest[]>('/friends/requests');
     } catch {
       return [];
     }

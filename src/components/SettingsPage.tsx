@@ -272,46 +272,22 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
       return;
     }
 
-    // Check if username has changed
-    const usernameChanged = profileData.name !== user.name;
-    
-    if (usernameChanged) {
-      // Check if user can change username
-      const canChangeUsername = checkUsernameChangePermission();
-      
-      if (!canChangeUsername.allowed) {
-        toast({
-          title: "Username change not allowed",
-          description: canChangeUsername.reason,
-          variant: "destructive"
-        });
-        return;
-      }
-    }
-
     const updatedUser = {
       ...user,
       ...profileData,
       avatar: profileImage || user.avatar,
       age: profileData.age ? Number(profileData.age) : undefined,
-      // Update lastUsernameChange if username was changed
-      lastUsernameChange: usernameChanged ? new Date().toISOString() : user.lastUsernameChange,
+      // Username is not editable from Settings; never mutate lock fields client-side.
+      lastUsernameChange: user.lastUsernameChange,
     };
 
     try {
       await onUpdateUser(updatedUser);
       setIsEditingProfile(false);
-      if (usernameChanged) {
-        toast({
-          title: "Username updated successfully",
-          description: "Your username has been changed. Next change allowed after 30 days."
-        });
-      } else {
-        toast({
-          title: "Profile updated",
-          description: "Your profile has been saved successfully"
-        });
-      }
+      toast({
+        title: "Profile updated",
+        description: "Your profile has been saved successfully"
+      });
     } catch (err) {
       console.error('Failed to save profile', err);
       toast({
@@ -322,39 +298,8 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
     }
   };
 
-  const checkUsernameChangePermission = () => {
-    // If user has never changed username, allow change
-    if (!user.lastUsernameChange) {
-      return { allowed: true, reason: "" };
-    }
-
-    const lastChangeDate = new Date(user.lastUsernameChange);
-    const now = new Date();
-    const daysDifference = Math.floor((now.getTime() - lastChangeDate.getTime()) / (1000 * 60 * 60 * 24));
-    
-    // Allow change if 30 days have passed
-    if (daysDifference >= 30) {
-      return { allowed: true, reason: "" };
-    }
-
-    const daysRemaining = 30 - daysDifference;
-    return { 
-      allowed: false, 
-      reason: `You can change your username in ${daysRemaining} days. Last changed on ${lastChangeDate.toLocaleDateString()}.`
-    };
-  };
-
   const getUsernameChangeStatus = () => {
-    if (!user.lastUsernameChange) {
-      return "You haven't changed your username yet.";
-    }
-
-    const permission = checkUsernameChangePermission();
-    if (permission.allowed) {
-      return "You can change your username now.";
-    }
-
-    return permission.reason;
+    return "Username can’t be changed from Settings.";
   };
 
   // OTP Functions
@@ -685,21 +630,15 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
                   <div className="md:col-span-2">
                     <div className="flex items-center justify-between">
                       <Label htmlFor="name">Username</Label>
-                      {user.lastUsernameChange && (
-                        <Badge variant="outline" className="text-xs">
-                          {checkUsernameChangePermission().allowed ? (
-                            <span className="text-green-600">✓ Can change</span>
-                          ) : (
-                            <span className="text-orange-600">⏳ Cooldown active</span>
-                          )}
-                        </Badge>
-                      )}
+                      <Badge variant="outline" className="text-xs">
+                        <span className="text-orange-600">Locked</span>
+                      </Badge>
                     </div>
                     <Input
                       id="name"
                       value={profileData.name}
                       onChange={(e) => setProfileData(prev => ({ ...prev, name: e.target.value }))}
-                      disabled={!isEditingProfile}
+                      disabled
                     />
                     <p className="text-xs text-muted-foreground mt-1">
                       {getUsernameChangeStatus()}

@@ -87,9 +87,9 @@ const GENDER_OPTIONS = [
   { value: "prefer-not", label: "Prefer not to say" }
 ];
 
-const DOB_MIN_DATE = new Date("1900-01-01");
+const DOB_MIN_AGE = 15;
+const DOB_MAX_AGE = 99;
 const DOB_DEFAULT_MONTH = new Date("2000-01-01");
-const DOB_MAX_YEAR = new Date().getFullYear();
 
 const parseDobString = (value?: string | null) => {
   if (!value) {
@@ -139,6 +139,21 @@ export const AccountSettingsContent = ({
   const { toast } = useToast();
   const initialDob = (user as any)?.dob || "";
   const initialDobDate = parseDobString(initialDob);
+  const dobLocked = !!initialDobDate;
+
+  const dobMaxDate = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setFullYear(d.getFullYear() - DOB_MIN_AGE);
+    return d;
+  }, []);
+
+  const dobMinDate = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setFullYear(d.getFullYear() - DOB_MAX_AGE);
+    return d;
+  }, []);
   const initialAge = user.age ? String(user.age) : (initialDobDate ? calculateAgeFromDate(initialDobDate) : "");
   const [profileForm, setProfileForm] = useState({
     displayName: user.displayName || user.name || "",
@@ -330,6 +345,7 @@ export const AccountSettingsContent = ({
   };
 
   const handleDobSelect = (date?: Date) => {
+    if (dobLocked) return;
     if (!date) {
       setProfileForm((prev) => ({ ...prev, dob: "", age: "" }));
       return;
@@ -370,16 +386,16 @@ export const AccountSettingsContent = ({
         <CardContent className="flex-1 overflow-y-auto space-y-8 p-6">
           {showProfileSection && (
             <section className="space-y-4">
-            <div className="flex items-center gap-2">
-              <UserIcon className="w-4 h-4 text-muted-foreground" />
-              <h3 className="font-semibold text-lg">Profile</h3>
-            </div>
-            {disableProfileEditing && disabledProfileMessage && (
-              <Alert variant="default">
-                <AlertDescription>{disabledProfileMessage}</AlertDescription>
-              </Alert>
-            )}
-            <form onSubmit={handleProfileSubmit} className="space-y-4">
+              <div className="flex items-center gap-2">
+                <UserIcon className="w-4 h-4 text-muted-foreground" />
+                <h3 className="font-semibold text-lg">Profile</h3>
+              </div>
+              {disableProfileEditing && disabledProfileMessage && (
+                <Alert variant="default">
+                  <AlertDescription>{disabledProfileMessage}</AlertDescription>
+                </Alert>
+              )}
+              <form onSubmit={handleProfileSubmit} className="space-y-4">
               <div className="flex flex-col gap-4 rounded-xl border border-dashed border-border/60 p-4 md:flex-row md:items-center">
                 <div className="flex items-center gap-3">
                   <div
@@ -388,16 +404,18 @@ export const AccountSettingsContent = ({
                       profileForm.photoURL ? "cursor-zoom-in focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" : "cursor-not-allowed"
                     )}
                     role={profileForm.photoURL ? "button" : undefined}
-                    tabIndex={profileForm.photoURL ? 0 : -1}
                     onClick={profileForm.photoURL ? handleOpenPhotoPreview : undefined}
-                    onKeyDown={(event) => {
-                      if (!profileForm.photoURL) return;
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        handleOpenPhotoPreview();
-                      }
-                    }}
-                    title={profileForm.photoURL ? "Click to preview" : "Upload a photo to preview"}
+                    tabIndex={profileForm.photoURL ? 0 : -1}
+                    onKeyDown={
+                      profileForm.photoURL
+                        ? (event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              handleOpenPhotoPreview();
+                            }
+                          }
+                        : undefined
+                    }
                   >
                     <Avatar className="h-16 w-16">
                       <AvatarImage src={profileForm.photoURL || undefined} alt={profileForm.displayName || "Avatar"} />
@@ -500,7 +518,7 @@ export const AccountSettingsContent = ({
                           "mt-1 w-full justify-start text-left font-normal",
                           !profileForm.dob && "text-muted-foreground"
                         )}
-                        disabled={disableProfileEditing || savingProfile}
+                        disabled={disableProfileEditing || savingProfile || dobLocked}
                       >
                         <CalendarIcon className="mr-2 h-4 w-4" />
                         {selectedDobDate ? format(selectedDobDate, "PPP") : "Pick a date"}
@@ -511,18 +529,19 @@ export const AccountSettingsContent = ({
                         mode="single"
                         selected={selectedDobDate}
                         onSelect={handleDobSelect}
-                        disabled={(date) => date > new Date() || date < DOB_MIN_DATE}
+                        disabled={(date) => dobLocked || date > dobMaxDate || date < dobMinDate}
                         captionLayout="dropdown-buttons"
-                        fromYear={DOB_MIN_DATE.getFullYear()}
-                        toYear={DOB_MAX_YEAR}
-                        defaultMonth={selectedDobDate || DOB_DEFAULT_MONTH}
+                        fromYear={dobMinDate.getFullYear()}
+                        toYear={dobMaxDate.getFullYear()}
+                        defaultMonth={selectedDobDate || dobMaxDate}
                         initialFocus
                       />
                     </PopoverContent>
                   </Popover>
-                  <div className="mt-2 flex items-center gap-2">
-                    <p className="text-xs text-muted-foreground">Pick your birth date to auto-fill age.</p>
-                    {profileForm.dob && (
+                  <div className="mt-2 flex flex-col gap-1">
+                    <p className="text-xs text-muted-foreground">Only ages {DOB_MIN_AGE} to {DOB_MAX_AGE} are allowed. DOB can be set once and can’t be changed.</p>
+                    {dobLocked && <p className="text-xs text-muted-foreground">DOB is locked.</p>}
+                    {profileForm.dob && !dobLocked && (
                       <Button
                         type="button"
                         variant="ghost"

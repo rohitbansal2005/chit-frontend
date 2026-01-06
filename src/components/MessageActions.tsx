@@ -99,7 +99,7 @@ export const MessageActions = ({
           Reply
         </DropdownMenuItem>
         
-        <DropdownMenuItem onClick={() => handleAction(() => navigator.clipboard.writeText('Message copied'))}>
+        <DropdownMenuItem onClick={() => handleAction(() => navigator.clipboard.writeText(messageContent || ''))}>
           <Copy className="w-4 h-4 mr-2" />
           Copy Text
         </DropdownMenuItem>

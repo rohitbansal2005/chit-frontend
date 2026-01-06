@@ -29,6 +29,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { format, formatDistanceToNow } from 'date-fns';
 import { playNotificationSound, unlockAudio } from '@/lib/notificationSound';
+import { apiClient } from '@/lib/apiClient';
 
 interface DeletionStatus {
   pending: boolean;
@@ -274,7 +275,9 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
       setPrivacyState((prev) => ({ ...prev, dmScope: value }));
       try {
         if (currentUser && currentUser.id) {
-          await UserService.updateUser(currentUser.id, { settings: { ...(currentUser as any).settings, dmScope: value } });
+          const prevSettings = ((currentUser as any).settings || {}) as any;
+          const prevPrivacy = (prevSettings.privacy || {}) as any;
+          await UserService.updateUser(currentUser.id, { settings: { ...prevSettings, privacy: { ...prevPrivacy, dmScope: value } } });
         }
         toast({
           title: 'Private messages updated',
@@ -288,9 +291,15 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
 
   // initialize profile visibility from current user settings when available
   useEffect(() => {
-    if (currentUser && (currentUser as any).settings && (currentUser as any).settings.profilePhotoVisibility) {
-      const pv = (currentUser as any).settings.profilePhotoVisibility as 'everyone' | 'friends';
-      setPrivacyState((prev) => ({ ...prev, profilePhotoVisibility: pv }));
+    if (currentUser && (currentUser as any).settings && (currentUser as any).settings.privacy) {
+      const privacy = (currentUser as any).settings.privacy as any;
+      const pv = (privacy.profilePhotoVisibility as 'everyone' | 'friends') || undefined;
+      const dm = (privacy.dmScope as 'everyone' | 'friends') || undefined;
+      setPrivacyState((prev) => ({
+        ...prev,
+        profilePhotoVisibility: pv || prev.profilePhotoVisibility,
+        dmScope: dm || prev.dmScope
+      }));
     }
     // initialize notification preferences from user settings if present
     if (currentUser && (currentUser as any).settings && (currentUser as any).settings.notifications) {
@@ -306,7 +315,9 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
     setPrivacyState((prev) => ({ ...prev, profilePhotoVisibility: value }));
     try {
       if (currentUser && currentUser.id) {
-        await UserService.updateUser(currentUser.id, { settings: { ...(currentUser as any).settings, profilePhotoVisibility: value } });
+        const prevSettings = ((currentUser as any).settings || {}) as any;
+        const prevPrivacy = (prevSettings.privacy || {}) as any;
+        await UserService.updateUser(currentUser.id, { settings: { ...prevSettings, privacy: { ...prevPrivacy, profilePhotoVisibility: value } } });
       }
       toast({
         title: 'Profile photo visibility updated',
@@ -442,31 +453,79 @@ const PrivacySettingsSection = ({ disabled }: PrivacySettingsSectionProps) => {
   );
 };
 
-const devices = [
-  {
-    id: 'device-1',
-    name: 'Chrome on Windows',
-    location: 'Ghaziabad, India',
-    lastActive: 'Active now',
-    primary: true
-  },
-  {
-    id: 'device-2',
-    name: 'Safari on iPhone 15',
-    location: 'Noida, India',
-    lastActive: '2 hours ago',
-    primary: false
-  },
-  {
-    id: 'device-3',
-    name: 'Edge on Surface',
-    location: 'Unknown location',
-    lastActive: 'Yesterday',
-    primary: false
-  }
-];
+type ApiSession = {
+  sessionId: string;
+  userId?: string;
+  deviceId?: string;
+  userAgent?: string;
+  ip?: string;
+  revoked?: boolean;
+  risk?: boolean;
+  riskScore?: number;
+  riskReason?: string;
+  createdAt?: string | Date;
+  lastActive?: string | Date;
+};
+
+const formatSessionLabel = (session: ApiSession) => {
+  const ua = (session.userAgent || '').toString();
+  if (!ua.trim()) return 'Unknown device';
+  // Keep it simple: show first 60 chars
+  return ua.length > 60 ? `${ua.slice(0, 60)}…` : ua;
+};
 
 const SessionSecuritySection = () => {
+  const { currentUser } = useAuth();
+  const { toast } = useToast();
+  const isGuest = Boolean(currentUser?.type === 'guest' || currentUser?.isAnonymous);
+
+  const [sessions, setSessions] = useState<ApiSession[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  const loadSessions = useCallback(async () => {
+    if (!currentUser || isGuest) {
+      setSessions([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await apiClient.get<{ sessions: ApiSession[] }>('/sessions/me');
+      setSessions(Array.isArray(result?.sessions) ? result.sessions : []);
+    } catch (error: any) {
+      setSessions([]);
+      toast({
+        title: 'Unable to load sessions',
+        description: error?.message || 'Please try again later.',
+        variant: 'destructive'
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [currentUser, isGuest, toast]);
+
+  useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
+
+  const handleRevoke = async (sessionId: string) => {
+    if (!sessionId) return;
+    setRevokingId(sessionId);
+    try {
+      await apiClient.post(`/sessions/${encodeURIComponent(sessionId)}/revoke`, {});
+      toast({ title: 'Signed out', description: 'That session has been signed out.' });
+      await loadSessions();
+    } catch (error: any) {
+      toast({
+        title: 'Unable to sign out',
+        description: error?.message || 'Please try again later.',
+        variant: 'destructive'
+      });
+    } finally {
+      setRevokingId(null);
+    }
+  };
+
   return (
     <Card className="border border-border/70 shadow-xl">
       <CardHeader className="flex flex-row items-start justify-between gap-4">
@@ -477,23 +536,58 @@ const SessionSecuritySection = () => {
         <RadioTower className="w-5 h-5 text-blue-500" />
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="rounded-xl border border-border/60 divide-y divide-border">
-          {devices.map((device) => (
-            <div key={device.id} className="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="font-medium">
-                  {device.name}
-                  {device.primary && <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">Primary</span>}
-                </p>
-                <p className="text-sm text-muted-foreground">{device.location}</p>
-                <p className="text-xs text-muted-foreground">{device.lastActive}</p>
-              </div>
-              <Button variant="outline" size="sm" className="self-start sm:self-auto">
-                <LogOut className="mr-2 h-4 w-4" /> Sign out
-              </Button>
-            </div>
-          ))}
-        </div>
+        {isGuest ? (
+          <Alert>
+            <AlertDescription>Guest sessions are temporary. Create a free account to manage device sessions.</AlertDescription>
+          </Alert>
+        ) : (
+          <div className="rounded-xl border border-border/60 divide-y divide-border">
+            {loading ? (
+              <div className="px-4 py-4 text-sm text-muted-foreground">Loading sessions…</div>
+            ) : sessions.length === 0 ? (
+              <div className="px-4 py-4 text-sm text-muted-foreground">No active sessions found.</div>
+            ) : (
+              sessions.map((session) => {
+                const lastActive = session.lastActive ? new Date(session.lastActive) : null;
+                const createdAt = session.createdAt ? new Date(session.createdAt) : null;
+                const risky = Boolean(session.risk);
+
+                return (
+                  <div key={session.sessionId} className="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="font-medium break-words">
+                        {formatSessionLabel(session)}
+                        {risky && (
+                          <Badge variant="destructive" className="ml-2">Risk</Badge>
+                        )}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {session.ip ? `IP: ${session.ip}` : 'IP: unknown'}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {lastActive ? `Last active ${formatDistanceToNow(lastActive, { addSuffix: true })}` : 'Last active: unknown'}
+                        {createdAt ? ` • Created ${formatDistanceToNow(createdAt, { addSuffix: true })}` : ''}
+                      </p>
+                      {risky && session.riskReason && (
+                        <p className="text-xs text-destructive/90">{session.riskReason}</p>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="self-start sm:self-auto"
+                      disabled={revokingId === session.sessionId}
+                      onClick={() => handleRevoke(session.sessionId)}
+                    >
+                      <LogOut className="mr-2 h-4 w-4" />
+                      {revokingId === session.sessionId ? 'Signing out…' : 'Sign out'}
+                    </Button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
