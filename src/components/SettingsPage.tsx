@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import { useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
   Camera, 
@@ -46,6 +47,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
 import { useTheme } from "@/hooks/useTheme";
+import { RoomService } from '@/lib/app-data';
 
 interface User {
   name: string;
@@ -176,7 +178,74 @@ const countries = [
 export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsPageProps) => {
   const { theme, toggleTheme } = useTheme();
   const { toast } = useToast();
+  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const parseRoomIdFromUrl = (raw: string): string | null => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return null;
+
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      return null;
+    }
+
+    try {
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        if (url.origin !== window.location.origin) return null;
+      }
+    } catch {
+      return null;
+    }
+
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2 && parts[0] === 'chat') {
+      return decodeURIComponent(parts[1]);
+    }
+    return null;
+  };
+
+  const renderBioWithRoomLinks = (text: string) => {
+    const chunks = String(text || '').split(/(\s+)/);
+    return chunks.map((chunk, idx) => {
+      const roomId = parseRoomIdFromUrl(chunk);
+      if (!roomId) return <span key={idx}>{chunk}</span>;
+
+      return (
+        <button
+          key={idx}
+          type="button"
+          className="text-primary underline underline-offset-2"
+          onClick={async () => {
+            const uid = String((user as any)?.uid || (user as any)?.id || '').trim();
+            if (!uid) {
+              toast({
+                title: 'Login required',
+                description: 'Please login to join rooms.',
+                variant: 'destructive'
+              });
+              return;
+            }
+            try {
+              await RoomService.joinRoom(roomId, uid);
+              toast({ title: 'Joined room' });
+              navigate(`/chat/${encodeURIComponent(roomId)}`);
+            } catch (e: any) {
+              toast({
+                title: 'Join failed',
+                description: e?.message || 'Please try again.',
+                variant: 'destructive'
+              });
+            }
+          }}
+        >
+          {chunk}
+        </button>
+      );
+    });
+  };
   
   // Profile editing state
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -604,7 +673,7 @@ export const SettingsPage = ({ user, onBack, onUpdateUser, onLogout }: SettingsP
                     {user.bio && (
                       <div className="mt-2 p-2 bg-muted/50 rounded-md">
                         <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-                          {user.bio}
+                          {renderBioWithRoomLinks(user.bio)}
                         </p>
                       </div>
                     )}

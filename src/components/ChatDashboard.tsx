@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useToast } from '@/hooks/use-toast';
 import { ToastAction } from '@/components/ui/toast';
 import { Button } from "@/components/ui/button";
@@ -176,7 +176,7 @@ export const ChatDashboard = ({
   const [showStartDMModal, setShowStartDMModal] = useState(false);
   const [customRooms, setCustomRooms] = useState<ChatRoom[]>([]);
   const [joinedPrivateRooms, setJoinedPrivateRooms] = useState<string[]>([]);
-  const [joinedPublicRooms, setJoinedPublicRooms] = useState<string[]>(['general', 'random']); // Start with some default joined rooms
+  const [joinedPublicRooms, setJoinedPublicRooms] = useState<string[]>([]);
   const [selectedPeopleTab, setSelectedPeopleTab] = useState("friends");
   const [isRandomChatSearching, setIsRandomChatSearching] = useState(false);
   const [isExploreRoomsActive, setIsExploreRoomsActive] = useState(false);
@@ -188,6 +188,7 @@ export const ChatDashboard = ({
   const [activeDMRoom, setActiveDMRoom] = useState<ChatRoom | null>(null);
   const [dmInputMessage, setDmInputMessage] = useState("");
   const [dmConversations, setDmConversations] = useState<Record<string, DMMessage[]>>({});
+  const [unreadByRoomId, setUnreadByRoomId] = useState<Record<string, number>>({});
   
   // Backend data states
   const [publicRooms, setPublicRooms] = useState<ChatRoom[]>([]);
@@ -213,8 +214,20 @@ export const ChatDashboard = ({
   const getDmPartnerId = (dmRoom: ChatRoom | null) => {
     if (!dmRoom) return undefined;
     const members: string[] = ((dmRoom.participants || dmRoom.members || []) as any) || [];
-    const selfId = (user as any)?.id || user?.uid;
-    const partnerId = Array.isArray(members) ? members.find(m => m && m !== selfId) : undefined;
+    const selfIds = new Set(
+      [String((user as any)?.id ?? ''), String((user as any)?.uid ?? ''), String(user?.uid ?? '')]
+        .map(s => s.trim())
+        .filter(Boolean)
+    );
+
+    const partnerId = Array.isArray(members)
+      ? members.find(m => {
+          const id = String(m ?? '').trim();
+          if (!id) return false;
+          return !selfIds.has(id);
+        })
+      : undefined;
+
     return partnerId || (dmRoom.settings && (dmRoom.settings.matchUserId as any)) || undefined;
   };
 
@@ -234,9 +247,19 @@ export const ChatDashboard = ({
 
   const getDmPartnerIdFromRoom = (dmRoom: ChatRoom | null) => {
     if (!dmRoom) return undefined;
-    const selfId = (user as any)?.id || user?.uid;
+    const selfIds = new Set(
+      [String((user as any)?.id ?? ''), String((user as any)?.uid ?? ''), String(user?.uid ?? '')]
+        .map(s => s.trim())
+        .filter(Boolean)
+    );
     const members: string[] = ((dmRoom.participants || dmRoom.members || []) as any) || [];
-    const partnerId = Array.isArray(members) ? members.find(m => m && m !== selfId) : undefined;
+    const partnerId = Array.isArray(members)
+      ? members.find(m => {
+          const id = String(m ?? '').trim();
+          if (!id) return false;
+          return !selfIds.has(id);
+        })
+      : undefined;
     return partnerId || (dmRoom.settings && (dmRoom.settings.matchUserId as any)) || undefined;
   };
 
@@ -437,9 +460,22 @@ export const ChatDashboard = ({
         const publicRoomsFromApi = await RoomService.getPublicRooms();
         setPublicRooms(publicRoomsFromApi || []);
 
-        // Load user's rooms (for DMs/private view)
+        // Load user's rooms (membership list)
         const userRooms = await RoomService.getUserRooms(user.uid);
-        setDirectMessages(userRooms.filter(room => room.type === 'private' || room.type === 'dm'));
+
+        // Persist joined rooms across refresh (until user leaves)
+        const joinedPublic = new Set<string>();
+        const joinedPrivate = new Set<string>();
+        for (const r of userRooms || []) {
+          if (!r?.id) continue;
+          if (r.type === 'public') joinedPublic.add(String(r.id));
+          if (r.type === 'private') joinedPrivate.add(String(r.id));
+        }
+        setJoinedPublicRooms(Array.from(joinedPublic));
+        setJoinedPrivateRooms(Array.from(joinedPrivate));
+
+        // DM/private view list
+        setDirectMessages((userRooms || []).filter(room => room.type === 'private' || room.type === 'dm'));
 
         // Load friends - using user's friends array
         const userProfile = await UserService.getUserById(user.uid);
@@ -469,13 +505,19 @@ export const ChatDashboard = ({
       loadData();
     };
 
+    const onRoomsUpdated = () => {
+      loadData();
+    };
+
     try {
       window.addEventListener('chitz:blocked-users-updated', onBlockedUsersUpdated as any);
+      window.addEventListener('chitz:rooms-updated', onRoomsUpdated as any);
     } catch (e) {}
 
     return () => {
       try {
         window.removeEventListener('chitz:blocked-users-updated', onBlockedUsersUpdated as any);
+        window.removeEventListener('chitz:rooms-updated', onRoomsUpdated as any);
       } catch (e) {}
     };
   }, [user]);
@@ -548,6 +590,21 @@ export const ChatDashboard = ({
   const handleAcceptFriendRequest = async (requestId: string) => {
     if (!user) return;
     try {
+      // Only registered + verified users can accept friend requests
+      const me = await UserService.getUserById(String(user.uid || (user as any)?.id || '')).catch(() => null);
+      const userType = String((me as any)?.userType || '').toLowerCase();
+      const isGuest = !me || userType === 'guest' || (me as any)?.isAnonymous === true;
+      const isVerified = Boolean((me as any)?.emailVerified === true);
+      if (isGuest || !isVerified) {
+        toast({
+          title: 'Not allowed',
+          description: 'Only registered and verified users can accept friend requests.',
+          variant: 'destructive',
+          duration: 2500
+        });
+        return;
+      }
+
       const req = friendRequests.find(r => String(r.id) === String(requestId));
       await FriendService.acceptFriendRequest(requestId);
       setFriendRequests(prev => prev.filter(r => String(r.id) !== String(requestId)));
@@ -865,6 +922,48 @@ export const ChatDashboard = ({
 
   const visibleRooms = getVisibleRooms();
   const normalizedSearchQuery = searchQuery.toLowerCase();
+
+  const getLastSeenKey = (roomId: string) => `chitz:lastSeen:${roomId}`;
+  const getLastSeenMs = (roomId: string) => {
+    try {
+      const raw = localStorage.getItem(getLastSeenKey(roomId));
+      const n = raw ? Number(raw) : 0;
+      return Number.isFinite(n) ? n : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const markRoomSeenNow = (roomId: string) => {
+    const now = Date.now();
+    try {
+      localStorage.setItem(getLastSeenKey(roomId), String(now));
+    } catch {
+      // ignore
+    }
+    setUnreadByRoomId(prev => {
+      if (!prev[roomId]) return prev;
+      const copy = { ...prev };
+      copy[roomId] = 0;
+      return copy;
+    });
+  };
+
+  const selfUid = String((user as any)?.id || user?.uid || '').trim();
+  const joinedRoomsCount = visibleRooms.length;
+  const dmCount = directMessages.length;
+
+  const totalUnreadRooms = useMemo(() => {
+    let total = 0;
+    for (const r of visibleRooms) total += unreadByRoomId[r.id] || 0;
+    return total;
+  }, [unreadByRoomId, visibleRooms]);
+
+  const totalUnreadDMs = useMemo(() => {
+    let total = 0;
+    for (const r of directMessages) total += unreadByRoomId[r.id] || 0;
+    return total;
+  }, [directMessages, unreadByRoomId]);
   
   const filteredRooms = visibleRooms.filter(room => {
     const roomName = (room.name || '').toLowerCase();
@@ -875,6 +974,51 @@ export const ChatDashboard = ({
   const filteredDMs = directMessages.filter(dm =>
     (dm.name || '').toLowerCase().includes(normalizedSearchQuery)
   );
+
+  // Basic unread badge poller (counts messages newer than lastSeen)
+  useEffect(() => {
+    let cancelled = false;
+    const roomIds = Array.from(new Set([...visibleRooms.map(r => r.id), ...directMessages.map(r => r.id)])).filter(Boolean);
+    if (!roomIds.length) return;
+
+    const refresh = async () => {
+      if (!selfUid) return;
+      const updates: Record<string, number> = {};
+      await Promise.all(
+        roomIds.map(async (roomId) => {
+          try {
+            const lastSeen = getLastSeenMs(roomId);
+            const msgs: any[] = await MessageService.getRoomMessages(roomId, 100);
+            const unread = (msgs || []).filter(m => {
+              const senderId = String(m?.senderId || m?.userId || '').trim();
+              if (senderId && senderId === selfUid) return false;
+              const ts = new Date(m?.timestamp || m?.createdAt || 0).getTime();
+              return ts > lastSeen;
+            }).length;
+            updates[roomId] = unread;
+          } catch {
+            updates[roomId] = updates[roomId] ?? 0;
+          }
+        })
+      );
+      if (cancelled) return;
+      setUnreadByRoomId(prev => ({ ...prev, ...updates }));
+    };
+
+    refresh();
+    const id = setInterval(() => {
+      // Avoid wasting calls when tab is hidden
+      try {
+        if (typeof document !== 'undefined' && document.hidden) return;
+      } catch {}
+      refresh();
+    }, 12000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [directMessages, selfUid, visibleRooms]);
 
   // Resolve DM partner profiles (avatar / displayName) for better list rendering
   useEffect(() => {
@@ -1357,6 +1501,11 @@ export const ChatDashboard = ({
       if (dmId && activeDMRoom?.id !== dmId) {
         (async () => {
           try {
+            const existing = directMessages.find(r => String(r.id) === String(dmId));
+            if (existing) {
+              focusDMWithRoom(existing);
+              return;
+            }
             const dmRoom = await RoomService.getRoomById(dmId);
             if (dmRoom) {
               // ensure readable name
@@ -1379,7 +1528,7 @@ export const ChatDashboard = ({
     } catch (e) {
       // ignore
     }
-  }, [location.search, user?.uid]);
+  }, [location.search, user?.uid, directMessages]);
 
   // Restore random chat state from URL on mount / when location changes
   useEffect(() => {
@@ -1528,8 +1677,22 @@ export const ChatDashboard = ({
         <Tabs value={selectedTab} onValueChange={setSelectedTab} className="flex-1 flex flex-col">
           <div className="px-3 md:px-4 mb-2">
             <TabsList className="grid w-full grid-cols-3">
-              <TabsTrigger value="public">Rooms</TabsTrigger>
-              <TabsTrigger value="dms">Messages</TabsTrigger>
+              <TabsTrigger value="public">
+                Rooms
+                {joinedRoomsCount > 0 && (
+                  <Badge variant={totalUnreadRooms > 0 ? 'destructive' : 'secondary'} className="ml-1 text-xs">
+                    {totalUnreadRooms > 0 ? totalUnreadRooms : joinedRoomsCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="dms">
+                Messages
+                {dmCount > 0 && (
+                  <Badge variant={totalUnreadDMs > 0 ? 'destructive' : 'secondary'} className="ml-1 text-xs">
+                    {totalUnreadDMs > 0 ? totalUnreadDMs : dmCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
               <TabsTrigger value="people">
                 People
                 {friendRequests.length > 0 && (
@@ -1572,7 +1735,10 @@ export const ChatDashboard = ({
                     <Card 
                       key={room.id}
                       className="professional-card cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in"
-                      onClick={() => onJoinRoom(room)}
+                      onClick={() => {
+                        markRoomSeenNow(room.id);
+                        onJoinRoom(room);
+                      }}
                     >
                       <CardContent className="p-3">
                         <div className="flex items-center gap-2 md:gap-3">
@@ -1594,6 +1760,11 @@ export const ChatDashboard = ({
                                  <Badge variant="secondary" className="text-xs flex-shrink-0">
                                    {Array.isArray(room.members) ? room.members.length : (room.participants?.length || 0)}
                                  </Badge>
+                                 {unreadByRoomId[room.id] > 0 && (
+                                   <Badge variant="destructive" className="text-xs flex-shrink-0">
+                                     {unreadByRoomId[room.id]}
+                                   </Badge>
+                                 )}
                                  {joinedPublicRooms.includes(room.id) && (
                                    <AlertDialog>
                                      <AlertDialogTrigger asChild>
@@ -1665,7 +1836,10 @@ export const ChatDashboard = ({
                   <Card 
                     key={dm.id} 
                     className={`professional-card group cursor-pointer hover:bg-muted/50 transition-colors animate-scale-in ${activeDMRoom?.id === dm.id ? 'ring-2 ring-primary bg-muted/20' : ''}`}
-                    onClick={() => focusDMWithRoom(dm)}
+                    onClick={() => {
+                      markRoomSeenNow(dm.id);
+                      focusDMWithRoom(dm);
+                    }}
                     aria-current={activeDMRoom?.id === dm.id}
                   >
                     <CardContent className="p-3">
@@ -1686,7 +1860,11 @@ export const ChatDashboard = ({
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between">
                             <h4 className="font-medium text-sm truncate">{getDmDisplayName(dm)}</h4>
-                            {/* Unread count will be implemented with message service */}
+                            {unreadByRoomId[dm.id] > 0 && (
+                              <Badge variant="destructive" className="text-xs flex-shrink-0">
+                                {unreadByRoomId[dm.id]}
+                              </Badge>
+                            )}
                           </div>
                           {/* Last message will be fetched from message service */}
                           <p className="text-xs text-muted-foreground truncate">

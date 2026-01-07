@@ -11,6 +11,7 @@ interface MessageActionsProps {
   onDelete: (messageId: string) => void;
   onReport: (messageId: string) => void;
   onBlock: (userId: string) => void;
+  isBlocked?: boolean;
   onAddFriend: (userId: string) => void;
   onStartDM: (userId: string) => void;
   onReaction: (messageId: string, emoji: string) => void;
@@ -36,6 +37,7 @@ export const MessageActions = ({
   onDelete, 
   onReport, 
   onBlock,
+  isBlocked = false,
   onAddFriend,
   onStartDM,
   onReaction,
@@ -163,7 +165,7 @@ export const MessageActions = ({
               className="text-destructive focus:text-destructive"
             >
               <Ban className="w-4 h-4 mr-2" />
-              Block User
+              {isBlocked ? 'Unblock User' : 'Block User'}
             </DropdownMenuItem>
           </>
         )}

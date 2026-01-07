@@ -21,6 +21,7 @@ interface UserActionsMenuProps {
   userId: string;
   userName: string;
   isCurrentUser?: boolean;
+  isBlocked?: boolean;
   onViewProfile: (userId: string) => void;
   onStartDM: (userId: string) => void;
   onAddFriend: (userId: string) => void;
@@ -34,6 +35,7 @@ export const UserActionsMenu = ({
   userId,
   userName,
   isCurrentUser = false,
+  isBlocked = false,
   onViewProfile,
   onStartDM,
   onAddFriend,
@@ -92,7 +94,7 @@ export const UserActionsMenu = ({
           className="text-red-600 focus:text-red-600"
         >
           <UserMinus className="w-4 h-4 mr-2" />
-          Block User
+          {isBlocked ? 'Unblock User' : 'Block User'}
         </DropdownMenuItem>
         {onDeleteChat && (
           <>

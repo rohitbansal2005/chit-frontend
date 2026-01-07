@@ -205,10 +205,20 @@ export class RoomService {
 
   static async joinRoom(roomId: string, userId: string) {
     await apiClient.post(`/rooms/${roomId}/join`, { userId });
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('chitz:rooms-updated'));
+      }
+    } catch (e) {}
   }
 
   static async leaveRoom(roomId: string, userId: string) {
     await apiClient.post(`/rooms/${roomId}/leave`, { userId });
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('chitz:rooms-updated'));
+      }
+    } catch (e) {}
   }
 
   static async createDMRoom(userId1: string, userId2: string): Promise<string> {
@@ -227,6 +237,11 @@ export class RoomService {
 
   static async hideRoom(roomId: string) {
     await apiClient.post(`/rooms/${roomId}/hide`, {});
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('chitz:rooms-updated'));
+      }
+    } catch (e) {}
   }
 }
 
@@ -254,6 +269,20 @@ export class MessageService {
     } catch {
       return [];
     }
+  }
+
+  static async markDmDelivered(roomId: string, messageIds: string[]) {
+    if (!roomId) return;
+    const ids = Array.isArray(messageIds) ? messageIds.map(String).filter(Boolean).slice(0, 200) : [];
+    if (!ids.length) return;
+    await apiClient.post(`/rooms/${roomId}/messages/mark-delivered`, { messageIds: ids });
+  }
+
+  static async markDmRead(roomId: string, messageIds: string[]) {
+    if (!roomId) return;
+    const ids = Array.isArray(messageIds) ? messageIds.map(String).filter(Boolean).slice(0, 200) : [];
+    if (!ids.length) return;
+    await apiClient.post(`/rooms/${roomId}/messages/mark-read`, { messageIds: ids });
   }
 
   static async updateMessage(messageId: string, updates: Partial<ChatMessage>) {

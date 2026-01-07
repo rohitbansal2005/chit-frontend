@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { UserService, AppUser, RoomService, FriendService } from '@/lib/app-data';
 import { apiClient } from '@/lib/apiClient';
+import { useBlockedUsers } from '@/hooks/useBlockedUsers';
+import { toast } from '@/hooks/use-toast';
 
 const Profile = () => {
   const { user, currentUser, loading } = useAuth();
@@ -55,6 +57,9 @@ const Profile = () => {
     return null;
   }
 
+  const myId = currentUser?.id || user?.uid || '';
+  const { isBlocked, toggleBlockUser } = useBlockedUsers(myId);
+
   // Minimal profile view: show avatar, name, optional age/country/gender/bio and simple badges
   const display = viewUser || currentUser;
   const showAge = (display as any).age !== undefined && (display as any).age !== null;
@@ -64,6 +69,72 @@ const Profile = () => {
   const isGuest = (display as any).userType === 'guest' || (display as any).isAnonymous;
   const isRegistered = !isGuest;
   const isVerified = (display as any).emailVerified === true;
+
+  const parseRoomIdFromUrl = (raw: string): string | null => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return null;
+
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      return null;
+    }
+
+    try {
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        if (url.origin !== window.location.origin) return null;
+      }
+    } catch {
+      return null;
+    }
+
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2 && parts[0] === 'chat') {
+      return decodeURIComponent(parts[1]);
+    }
+    return null;
+  };
+
+  const renderBioWithRoomLinks = (text: string) => {
+    const chunks = String(text || '').split(/(\s+)/);
+    return chunks.map((chunk, idx) => {
+      const roomId = parseRoomIdFromUrl(chunk);
+      if (!roomId) return <span key={idx}>{chunk}</span>;
+
+      return (
+        <button
+          key={idx}
+          type="button"
+          className="text-primary underline underline-offset-2"
+          onClick={async () => {
+            const uid = String(myId || '').trim();
+            if (!uid) {
+              toast({
+                title: 'Login required',
+                description: 'Please login to join rooms.',
+                variant: 'destructive'
+              });
+              return;
+            }
+            try {
+              await RoomService.joinRoom(roomId, uid);
+              toast({ title: 'Joined room' });
+              navigate(`/chat/${encodeURIComponent(roomId)}`);
+            } catch (e: any) {
+              toast({
+                title: 'Join failed',
+                description: e?.message || 'Please try again.',
+                variant: 'destructive'
+              });
+            }
+          }}
+        >
+          {chunk}
+        </button>
+      );
+    });
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 p-8">
@@ -115,6 +186,15 @@ const Profile = () => {
                             setMenuOpen(false);
                             try {
                               const myId = currentUser?.id || user?.uid || '';
+                              const me = myId ? await UserService.getUserById(String(myId)).catch(() => null) : null;
+                              const userType = String((me as any)?.userType || '').toLowerCase();
+                              const isGuest = !me || userType === 'guest' || (me as any)?.isAnonymous === true;
+                              const isVerified = Boolean((me as any)?.emailVerified === true);
+                              if (isGuest || !isVerified) {
+                                setActionMsg('Only registered and verified users can send friend requests');
+                                return;
+                              }
+
                               const resp = await FriendService.sendFriendRequest(myId, display.id);
                               const msg = String(resp?.message || '').toLowerCase();
                               if (msg.includes('already friends')) {
@@ -131,10 +211,11 @@ const Profile = () => {
                           <button title="Block user" className="w-full text-left px-3 py-2 hover:bg-muted" onClick={async () => {
                             setMenuOpen(false);
                             try {
-                              await UserService.blockUser(user?.uid || '', display.id);
-                              setActionMsg('User blocked');
+                              const wasBlocked = isBlocked(display.id);
+                              await toggleBlockUser(display.id);
+                              setActionMsg(wasBlocked ? 'User unblocked' : 'User blocked');
                             } catch (e) { setActionMsg('Could not block user'); }
-                          }}>Block</button>
+                          }}>{isBlocked(display.id) ? 'Unblock' : 'Block'}</button>
                           <button title="Report user" className="w-full text-left px-3 py-2 hover:bg-muted text-red-600" onClick={async () => {
                             setMenuOpen(false);
                             try {
@@ -207,7 +288,9 @@ const Profile = () => {
             {showBio && (
               <div className="mt-2 text-left w-full">
                 <h3 className="text-sm font-medium mb-1">About</h3>
-                <p className="text-sm text-muted-foreground bg-muted p-3 rounded">{(display as any).bio}</p>
+                <div className="text-sm text-muted-foreground bg-muted p-3 rounded whitespace-pre-wrap break-words leading-relaxed">
+                  {renderBioWithRoomLinks(String((display as any).bio || ''))}
+                </div>
               </div>
             )}
           </div>

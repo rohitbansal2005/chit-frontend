@@ -17,7 +17,9 @@ import { ReportModal } from "@/components/ReportModal";
 import { UserActionsMenu } from "@/components/UserActionsMenu";
 import { MuteDurationModal } from "@/components/MuteDurationModal";
 import { MuteCountdown } from "@/components/MuteCountdown";
+import { RoomLinkPreview } from "@/components/RoomLinkPreview";
 import { toast } from "@/hooks/use-toast";
+import { useBlockedUsers } from "@/hooks/useBlockedUsers";
 import { useNavigate } from 'react-router-dom';
 import { io as socketIo } from 'socket.io-client';
 import { 
@@ -51,7 +53,7 @@ import {
   SkipForward
 } from "lucide-react";
 import { uploadToCloudinary } from "@/lib/cloudinary";
-import { FriendService, RoomService, UserService, type ChatRoom as ApiChatRoom } from "@/lib/app-data";
+import { FriendService, MessageService, RoomService, UserService, type ChatRoom as ApiChatRoom } from "@/lib/app-data";
 
 interface Message {
   id: string;
@@ -72,6 +74,8 @@ interface Message {
   reactions?: { [emoji: string]: string[] }; // emoji -> array of userIds who reacted
   userRole?: 'owner' | 'admin' | 'member';
   userIsPremium?: boolean;
+  deliveredTo?: string[];
+  readBy?: string[];
 }
 
 interface User {
@@ -211,10 +215,143 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const typingEmitTimerRef = useRef<any>(null);
   const partnerTypingOffTimerRef = useRef<any>(null);
 
-  const effectiveUserId = currentUserId || 'current-user';
+  const effectiveUserId =
+    currentUserId ||
+    String((currentUser as any)?.id || (currentUser as any)?.uid || (currentUser as any)?._id || '') ||
+    'current-user';
   const isOwnMessage = (msg: Message) => msg.userId === effectiveUserId;
+  const { isBlocked, toggleBlockUser } = useBlockedUsers(effectiveUserId);
+
+  type UserMeta = {
+    userType?: string;
+    emailVerified?: boolean;
+    isAnonymous?: boolean;
+  };
+  const [userMetaById, setUserMetaById] = useState<Record<string, UserMeta>>({});
+  const userMetaInFlightRef = useRef<Set<string>>(new Set());
 
   const [roomDetails, setRoomDetails] = useState<ApiChatRoom | null>(null);
+
+  const getRoleForUserId = (userId: string): 'owner' | 'admin' | 'member' => {
+    if (roomType === 'dm') return 'member';
+    if (!roomDetails) return 'member';
+    const uid = String(userId);
+    if (roomDetails.owner && String(roomDetails.owner) === uid) return 'owner';
+    if (Array.isArray(roomDetails.admins) && roomDetails.admins.some((a: any) => String(a) === uid)) return 'admin';
+    return 'member';
+  };
+
+  useEffect(() => {
+    const ids = new Set<string>();
+    if (effectiveUserId && String(effectiveUserId) !== 'current-user') ids.add(String(effectiveUserId));
+    for (const m of messages) {
+      if (!m || m.type === 'system') continue;
+      const id = String(m.userId || '').trim();
+      if (id && id !== 'system') ids.add(id);
+    }
+
+    const missing = Array.from(ids).filter(id => !userMetaById[id] && !userMetaInFlightRef.current.has(id));
+    if (!missing.length) return;
+
+    missing.forEach(id => userMetaInFlightRef.current.add(id));
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const results = await Promise.allSettled(missing.map(id => UserService.getUserById(id)));
+        if (cancelled) return;
+
+        setUserMetaById(prev => {
+          const next = { ...prev };
+          results.forEach((r, idx) => {
+            const id = missing[idx];
+            if (r.status !== 'fulfilled' || !r.value) return;
+            const u: any = r.value;
+            const meta: UserMeta = {
+              userType: u?.userType,
+              emailVerified: Boolean(u?.emailVerified),
+              isAnonymous: Boolean(u?.isAnonymous)
+            };
+            next[id] = meta;
+          });
+          return next;
+        });
+      } finally {
+        missing.forEach(id => userMetaInFlightRef.current.delete(id));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveUserId, messages, userMetaById]);
+
+  const dmPartnerActionId = useMemo(() => {
+    if (roomType !== 'dm') return undefined;
+
+    const candidateIds: string[] = [];
+
+    if (dmPartnerId) candidateIds.push(String(dmPartnerId));
+
+    try {
+      const fromRoom: any[] = ((roomDetails as any)?.participants || (roomDetails as any)?.members || []) as any;
+      if (Array.isArray(fromRoom)) {
+        for (const raw of fromRoom) {
+          const id = String(raw ?? '').trim();
+          if (id && id !== String(effectiveUserId)) candidateIds.push(id);
+        }
+      }
+    } catch (e) {}
+
+    try {
+      for (const m of messages) {
+        const id = String((m as any)?.userId ?? '').trim();
+        if (!id) continue;
+        if ((m as any)?.type === 'system') continue;
+        if (id !== String(effectiveUserId)) candidateIds.push(id);
+      }
+    } catch (e) {}
+
+    const unique = Array.from(new Set(candidateIds.filter(Boolean)));
+    const blocked = unique.find(id => isBlocked(id));
+    return blocked || unique[0] || undefined;
+  }, [dmPartnerId, effectiveUserId, isBlocked, messages, roomDetails, roomType]);
+
+  const dmOtherCandidateIds = useMemo(() => {
+    if (roomType !== 'dm') return [] as string[];
+    const out: string[] = [];
+
+    if (dmPartnerId) out.push(String(dmPartnerId));
+    if (dmPartnerActionId) out.push(String(dmPartnerActionId));
+
+    try {
+      const fromRoom: any[] = ((roomDetails as any)?.participants || (roomDetails as any)?.members || []) as any;
+      if (Array.isArray(fromRoom)) {
+        for (const raw of fromRoom) {
+          const id = String(raw ?? '').trim();
+          if (id && id !== String(effectiveUserId)) out.push(id);
+        }
+      }
+    } catch (e) {}
+
+    return Array.from(new Set(out.map(String).filter(Boolean)));
+  }, [dmPartnerActionId, dmPartnerId, effectiveUserId, roomDetails, roomType]);
+
+  const getDmTicks = (msg: Message) => {
+    if (roomType !== 'dm') return '';
+    if (!isOwnMessage(msg)) return '';
+    if (!dmOtherCandidateIds.length) return '';
+
+    const deliveredTo = Array.isArray(msg.deliveredTo) ? msg.deliveredTo.map(String) : [];
+    const readBy = Array.isArray(msg.readBy) ? msg.readBy.map(String) : [];
+
+    const isRead = dmOtherCandidateIds.some(id => readBy.includes(String(id)));
+    const isDelivered = isRead || dmOtherCandidateIds.some(id => deliveredTo.includes(String(id)));
+
+    if (isRead) return '✓✓';
+    if (isDelivered) return '✓';
+    return '';
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -261,6 +398,125 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   }, [effectiveUserId, roomDetails]);
 
   const canManageGroup = roomType !== 'dm' && (currentUserRole === 'owner' || currentUserRole === 'admin');
+
+  const [dmAreFriends, setDmAreFriends] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (roomType !== 'dm') {
+      setDmAreFriends(null);
+      return;
+    }
+
+    // Guests cannot be "friends" for DM media gating.
+    if (!effectiveUserId || String(effectiveUserId) === 'current-user') {
+      setDmAreFriends(false);
+      return;
+    }
+
+    if (!dmOtherCandidateIds.length) {
+      setDmAreFriends(false);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await UserService.getUserById(String(effectiveUserId));
+        if (cancelled) return;
+        const friends = Array.isArray((me as any)?.friends) ? (me as any).friends.map(String) : [];
+        const candidates = dmOtherCandidateIds.map(String);
+
+        let ok = candidates.some((id) => friends.includes(String(id)));
+        if (!ok && candidates[0]) {
+          const other = await UserService.getUserById(String(candidates[0])).catch(() => null);
+          if (cancelled) return;
+          const otherKeys = [
+            candidates[0],
+            (other as any)?.id,
+            (other as any)?._id,
+            (other as any)?.guestId
+          ].map(v => (v === undefined || v === null) ? '' : String(v)).filter(Boolean);
+          ok = otherKeys.some((k) => friends.includes(String(k)));
+        }
+
+        setDmAreFriends(ok);
+      } catch (e) {
+        // Be conservative: treat as not friends if we can't verify
+        setDmAreFriends(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dmOtherCandidateIds, effectiveUserId, roomType]);
+
+  const canCurrentUserSendMedia = () => {
+    // Owner/Admin are always treated as registered+verified (per earlier badge rules)
+    if (currentUserRole === 'owner' || currentUserRole === 'admin') return true;
+
+    const meta = userMetaById[String(effectiveUserId)];
+    const isGuest =
+      String(effectiveUserId) === 'current-user' ||
+      meta?.userType === 'guest' ||
+      meta?.isAnonymous === true;
+    const isRegistered = !isGuest;
+    const isVerified = meta?.emailVerified === true;
+
+    if (isRegistered && isVerified) {
+      if (roomType === 'dm') {
+        if (dmAreFriends === true) return true;
+        toast({
+          title: 'Not allowed',
+          description: 'To send images and voice notes in DMs, you must be friends first.',
+          variant: 'destructive',
+          duration: 2500
+        });
+        return false;
+      }
+      return true;
+    }
+
+    toast({
+      title: 'Not allowed',
+      description: 'To send images and voice notes, your account must be Registered and Verified.',
+      variant: 'destructive',
+      duration: 2500
+    });
+    return false;
+  };
+
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  const getMessageDayKey = (msg: Message) => {
+    const ts = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+    const d = startOfDay(new Date(ts));
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const getRelativeDayLabel = (msg: Message) => {
+    const ts = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+    const msgDay = startOfDay(new Date(ts));
+    const today = startOfDay(new Date());
+
+    const diffMs = today.getTime() - msgDay.getTime();
+    const diffDays = Math.max(0, Math.floor(diffMs / (24 * 60 * 60 * 1000)));
+
+    if (diffDays <= 0) return 'Today';
+    if (diffDays === 1) return '1 day before';
+    if (diffDays < 30) return `${diffDays} days before`;
+
+    const monthsDiff =
+      (today.getFullYear() - msgDay.getFullYear()) * 12 + (today.getMonth() - msgDay.getMonth());
+    if (monthsDiff <= 1) return '1 month before';
+    if (monthsDiff < 12) return `${monthsDiff} months before`;
+
+    const yearsDiff = today.getFullYear() - msgDay.getFullYear();
+    if (yearsDiff <= 1) return '1 year before';
+    return `${yearsDiff} years before`;
+  };
 
   const [resolvedGroupMembers, setResolvedGroupMembers] = useState<GroupMember[]>([]);
 
@@ -440,7 +696,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
         edited: Boolean(m.editedAt),
         deleted: isDeleted,
         reactions: Object.keys(reactionMap).length ? reactionMap : undefined,
-        timestamp: ts.getTime()
+        timestamp: ts.getTime(),
+        userRole: getRoleForUserId(senderId),
+        deliveredTo: Array.isArray(meta?.deliveredTo) ? meta.deliveredTo.map(String).filter(Boolean) : undefined,
+        readBy: Array.isArray(meta?.readBy) ? meta.readBy.map(String).filter(Boolean) : undefined
       };
     };
 
@@ -461,7 +720,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                 Boolean(before.edited) !== Boolean(msg.edited) ||
                 Boolean(before.deleted) !== Boolean(msg.deleted) ||
                 JSON.stringify(before.reactions || {}) !== JSON.stringify(msg.reactions || {}) ||
-                String(before.replyTo || '') !== String(msg.replyTo || '')
+                String(before.replyTo || '') !== String(msg.replyTo || '') ||
+                String((before as any).userRole || '') !== String((msg as any).userRole || '') ||
+                JSON.stringify((before as any).deliveredTo || []) !== JSON.stringify((msg as any).deliveredTo || []) ||
+                JSON.stringify((before as any).readBy || []) !== JSON.stringify((msg as any).readBy || [])
               );
               if (changed) merged[idx] = { ...before, ...msg };
             }
@@ -505,6 +767,40 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
         const resp: any[] = await apiClient.get(`/rooms/${roomId}/messages`, { limit: 100 });
         const incoming = (resp || []).map(mapApiMessage);
         if (!cancelled) mergeMessages(incoming);
+
+        // DM receipts (best-effort): mark received messages as delivered/read.
+        if (roomType === 'dm' && effectiveUserId && String(effectiveUserId) !== 'current-user') {
+          const received = incoming.filter(m => m.type !== 'system' && String(m.userId) !== String(effectiveUserId));
+          const ids = received.map(m => String(m.id)).filter(Boolean);
+          if (ids.length) {
+            try {
+              await MessageService.markDmDelivered(String(roomId), ids);
+            } catch (e) {
+              // ignore
+            }
+
+            // Only mark read when user is likely looking at newest messages
+            const canMarkRead = (() => {
+              try {
+                if (typeof document !== 'undefined' && document.hidden) return false;
+                // @ts-ignore
+                if (typeof window !== 'undefined' && window?.document && typeof window.document.hasFocus === 'function') {
+                  // @ts-ignore
+                  if (!window.document.hasFocus()) return false;
+                }
+              } catch (e) {}
+              return isNearBottomRef.current;
+            })();
+
+            if (canMarkRead) {
+              try {
+                await MessageService.markDmRead(String(roomId), ids);
+              } catch (e) {
+                // ignore
+              }
+            }
+          }
+        }
       } catch (e) {
         // ignore
       }
@@ -538,7 +834,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
         pollerRef.current = null;
       }
     };
-  }, [roomId, roomName, dmPartnerName, currentUser?.name, effectiveUserId]);
+  }, [roomId, roomName, dmPartnerName, currentUser?.name, effectiveUserId, roomDetails, roomType]);
 
   // Group settings and members
   const [groupSettings, setGroupSettings] = useState<GroupSettings>({
@@ -922,12 +1218,21 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   const handleBlock = (userId: string) => {
     (async () => {
       try {
-        await UserService.blockUser(effectiveUserId, userId);
-        toast({ title: 'User blocked', description: "You won't see messages from this user anymore.", variant: 'destructive' });
-        // If you're in a DM with this user, close it.
-        try { onBack?.(); } catch (e) {}
+        const wasBlocked = isBlocked(userId);
+        await toggleBlockUser(userId);
+        toast({
+          title: wasBlocked ? 'User unblocked' : 'User blocked',
+          description: wasBlocked
+            ? "You will start seeing messages from this user."
+            : "You won't see messages from this user anymore.",
+          variant: 'destructive'
+        });
+        // If you're in a DM with this user and you just blocked them, close it.
+        if (!wasBlocked) {
+          try { onBack?.(); } catch (e) {}
+        }
       } catch (err: any) {
-        toast({ title: 'Block failed', description: err?.message || 'Please try again.', variant: 'destructive' });
+        toast({ title: 'Block/unblock failed', description: err?.message || 'Please try again.', variant: 'destructive' });
       }
     })();
   };
@@ -946,20 +1251,20 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       return;
     }
 
-    // Navigate to DM or create new conversation
-    toast({ 
-      title: "Opening DM", 
-      description: `Starting conversation with ${userName}...` 
-    });
-
-    // TODO: Implement actual DM navigation
-    // For now, we'll simulate opening a DM
-    setTimeout(() => {
-      if (onBack) {
-        onBack(); // Go back to chat list
-        // In a real app, this would navigate to the DM with this user
+    // Navigate to (or create) a DM room
+    (async () => {
+      try {
+        toast({ title: 'Opening DM', description: `Starting conversation with ${userName}...` });
+        const dmRoomId = await RoomService.createDMRoom(String(effectiveUserId), String(userId));
+        navigate(`/dashboard?dm=${encodeURIComponent(dmRoomId)}`);
+      } catch (e: any) {
+        toast({
+          title: 'Could not open DM',
+          description: e?.message || 'Please try again.',
+          variant: 'destructive'
+        });
       }
-    }, 1000);
+    })();
   };
 
   const handleMentionUser = (userId: string) => {
@@ -1017,6 +1322,23 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
     const user = groupMembers.find(m => m.id === userId);
     const userName = user?.name || "User";
 
+    // Only registered + verified users can send friend requests
+    const meta = userMetaById[String(effectiveUserId)];
+    const isGuest =
+      String(effectiveUserId) === 'current-user' ||
+      meta?.userType === 'guest' ||
+      meta?.isAnonymous === true;
+    const canSend = !isGuest && meta?.emailVerified === true;
+    if (!canSend) {
+      toast({
+        title: 'Not allowed',
+        description: 'Only registered and verified users can send friend requests.',
+        variant: 'destructive',
+        duration: 2500
+      });
+      return;
+    }
+
     (async () => {
       try {
         if (sentFriendRequests[String(userId)]) {
@@ -1053,6 +1375,23 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleAddFriendByIdAndName = (userId: string, userName: string) => {
+    // Only registered + verified users can send friend requests
+    const meta = userMetaById[String(effectiveUserId)];
+    const isGuest =
+      String(effectiveUserId) === 'current-user' ||
+      meta?.userType === 'guest' ||
+      meta?.isAnonymous === true;
+    const canSend = !isGuest && meta?.emailVerified === true;
+    if (!canSend) {
+      toast({
+        title: 'Not allowed',
+        description: 'Only registered and verified users can send friend requests.',
+        variant: 'destructive',
+        duration: 2500
+      });
+      return;
+    }
+
     (async () => {
       try {
         if (sentFriendRequests[String(userId)]) {
@@ -1089,18 +1428,23 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleBlockUser = (userId: string) => {
-    const user = groupMembers.find(m => m.id === userId);
-    const userName = user?.name || "User";
-    
-    toast({
-      title: "User Blocked",
-      description: `${userName} has been blocked`,
-      variant: "destructive",
-      duration: 2000
-    });
-    
-    // TODO: Implement actual blocking logic
-    console.log(`Blocking user: ${userId} (${userName})`);
+    const member = groupMembers.find(m => m.id === userId);
+    const userName = member?.name || 'User';
+
+    (async () => {
+      try {
+        const wasBlocked = isBlocked(userId);
+        await toggleBlockUser(userId);
+        toast({
+          title: wasBlocked ? 'User unblocked' : 'User blocked',
+          description: wasBlocked ? `${userName} has been unblocked` : `${userName} has been blocked`,
+          variant: 'destructive',
+          duration: 2000
+        });
+      } catch (err: any) {
+        toast({ title: 'Block/unblock failed', description: err?.message || 'Please try again.', variant: 'destructive' });
+      }
+    })();
   };
 
   const handleBanUser = (userId: string, messageId?: string, messageContent?: string) => {
@@ -1243,12 +1587,17 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleFileUpload = () => {
+    if (!canCurrentUserSendMedia()) return;
     if (fileInputRef.current) {
       fileInputRef.current.click();
     }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canCurrentUserSendMedia()) {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -1327,6 +1676,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const startVoiceRecording = async () => {
+    if (!canCurrentUserSendMedia()) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -1542,6 +1892,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
       // When clicked from mic button, show preview
       stopVoiceRecordingForPreview();
     } else {
+      if (!canCurrentUserSendMedia()) return;
       startVoiceRecording();
     }
   };
@@ -1589,6 +1940,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
 
   // Send and Cancel functions for media
   const handleSendImage = () => {
+    if (!canCurrentUserSendMedia()) return;
     if (!selectedImage || !selectedImagePreview) return;
 
     // Add image message
@@ -1618,6 +1970,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleSendAudio = () => {
+    if (!canCurrentUserSendMedia()) return;
     if (!recordedAudio || !recordedAudioUrl) return;
 
     // Add voice message
@@ -1745,8 +2098,22 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
 
   // Header menu functions
   const handleLeaveRoom = () => {
-    toast({ title: "Left the room", description: "You have left the group" });
-    onBack();
+    if (!roomId) {
+      toast({ title: "Left the room", description: "You have left the group" });
+      onBack();
+      return;
+    }
+
+    (async () => {
+      try {
+        await RoomService.leaveRoom(roomId, effectiveUserId);
+        toast({ title: 'Left the room', description: 'You have left the group' });
+      } catch (err: any) {
+        toast({ title: 'Leave failed', description: err?.message || 'Please try again.', variant: 'destructive' });
+        return;
+      }
+      onBack();
+    })();
   };
 
   const handleCloseDM = () => {
@@ -1755,7 +2122,11 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
   };
 
   const handleShareRoom = () => {
-    const roomLink = `${window.location.origin}/room/${roomName}`;
+    if (!roomId) {
+      toast({ title: 'Cannot share', description: 'Room link is not available.', variant: 'destructive' });
+      return;
+    }
+    const roomLink = `${window.location.origin}/chat/${encodeURIComponent(String(roomId))}`;
     navigator.clipboard.writeText(roomLink);
     toast({ title: "Link copied!", description: "Room link copied to clipboard" });
   };
@@ -2028,9 +2399,9 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                         <Flag className="w-4 h-4 mr-2" />
                         Report User
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => dmPartner.id ? handleBlock(dmPartner.id) : null} className="text-red-600 focus:text-red-600">
+                      <DropdownMenuItem onClick={() => (dmPartnerActionId ? handleBlock(dmPartnerActionId) : null)} className="text-red-600 focus:text-red-600">
                         <Ban className="w-4 h-4 mr-2" />
-                        Block User
+                        {dmPartnerActionId && isBlocked(dmPartnerActionId) ? 'Unblock User' : 'Block User'}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={handleClearAllMessages}>
@@ -2091,12 +2462,30 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
           )}
           <div className="py-3 md:py-4 space-y-3 md:space-y-4 relative z-10">
             {/* Messages */}
-            {messages.map((msg) => (
+            {messages.map((msg, idx) => (
               <div key={msg.id} className="animate-scale-in group">{/* Added group class */}
+                {(() => {
+                  const currentKey = getMessageDayKey(msg);
+                  const prevKey = idx > 0 ? getMessageDayKey(messages[idx - 1]) : null;
+                  const showSeparator = idx === 0 || currentKey !== prevKey;
+                  if (!showSeparator) return null;
+                  return (
+                    <div className="text-center my-2">
+                      <div className="inline-block bg-muted px-4 py-1 rounded-full text-xs text-muted-foreground">
+                        {getRelativeDayLabel(msg)}
+                      </div>
+                    </div>
+                  );
+                })()}
                 {msg.type === 'system' ? (
                   <div className="text-center">
                     <div className="inline-block bg-muted px-3 py-1 rounded-full text-xs md:text-sm text-muted-foreground">
-                      {msg.message}
+                      <RoomLinkPreview
+                        text={msg.message}
+                        currentUserId={effectiveUserId}
+                        mentionUsers={roomType !== 'dm' ? resolvedGroupMembers.map(m => ({ id: m.id, name: m.name })) : undefined}
+                        onOpenDm={(id) => handleStartDM(id)}
+                      />
                     </div>
                   </div>
                 ) : (
@@ -2134,9 +2523,36 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                               >
                                 {msg.user}
                               </span>
+
+                              {(() => {
+                                const role = msg.userRole || getRoleForUserId(msg.userId);
+                                const meta = userMetaById[String(msg.userId)];
+                                const isGuest = role === 'owner' || role === 'admin'
+                                  ? false
+                                  : (meta?.userType === 'guest' || meta?.isAnonymous === true);
+                                const isRegistered = role === 'owner' || role === 'admin' ? true : !isGuest;
+                                const isVerified = (role === 'owner' || role === 'admin') ? true : (meta?.emailVerified === true);
+
+                                return (
+                                  <>
+                                    {isGuest && (
+                                      <Badge variant="outline" className="text-[10px] px-2 py-0 h-5">Guest</Badge>
+                                    )}
+                                    {isRegistered && (
+                                      <Badge variant="outline" className="text-[10px] px-2 py-0 h-5">Registered</Badge>
+                                    )}
+                                    {isVerified && (
+                                      <Badge variant="outline" className="text-[10px] px-2 py-0 h-5">Verified</Badge>
+                                    )}
+                                  </>
+                                );
+                              })()}
                               {/* User actions moved to message-level menu on the right side; removed duplicate here */}
                             </div>
-                            {roomType !== 'dm' && msg.userRole === 'owner' && (
+                            {(() => {
+                              const role = msg.userRole || getRoleForUserId(msg.userId);
+                              return roomType !== 'dm' && role === 'owner';
+                            })() && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Crown className="w-3 h-3 text-yellow-500 cursor-help" />
@@ -2146,7 +2562,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                                 </TooltipContent>
                               </Tooltip>
                             )}
-                            {roomType !== 'dm' && msg.userRole === 'admin' && (
+                            {(() => {
+                              const role = msg.userRole || getRoleForUserId(msg.userId);
+                              return roomType !== 'dm' && role === 'admin';
+                            })() && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Shield className="w-3 h-3 text-blue-500 cursor-help" />
@@ -2178,6 +2597,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                               onDelete={handleDelete}
                               onReport={handleReport}
                               onBlock={handleBlock}
+                              isBlocked={isBlocked(msg.userId)}
                               onAddFriend={handleAddFriend}
                               onStartDM={handleStartDM}
                               onReaction={handleReaction}
@@ -2251,7 +2671,12 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                             ))}
                           </div>
                         )}
-                        {msg.message}
+                        <RoomLinkPreview
+                          text={msg.message}
+                          currentUserId={effectiveUserId}
+                          mentionUsers={roomType !== 'dm' ? resolvedGroupMembers.map(m => ({ id: m.id, name: m.name })) : undefined}
+                          onOpenDm={(id) => handleStartDM(id)}
+                        />
                         {isOwnMessage(msg) && (
                           <div className="absolute -right-2 top-1/2 -translate-y-1/2">
                             <MessageActions
@@ -2262,6 +2687,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                               onDelete={handleDelete}
                               onReport={handleReport}
                               onBlock={handleBlock}
+                              isBlocked={isBlocked(msg.userId)}
                               onAddFriend={handleAddFriend}
                               onStartDM={handleStartDM}
                               onReaction={handleReaction}
@@ -2306,7 +2732,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                       {isOwnMessage(msg) && (
                         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground mt-1 mr-2">
                           <div className="flex items-center gap-1">
-                            {roomType !== 'dm' && msg.userRole === 'owner' && (
+                            {(() => {
+                              const role = msg.userRole || getRoleForUserId(msg.userId);
+                              return roomType !== 'dm' && role === 'owner';
+                            })() && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Crown className="w-3 h-3 text-yellow-500 cursor-help" />
@@ -2316,7 +2745,10 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                                 </TooltipContent>
                               </Tooltip>
                             )}
-                            {roomType !== 'dm' && msg.userRole === 'admin' && (
+                            {(() => {
+                              const role = msg.userRole || getRoleForUserId(msg.userId);
+                              return roomType !== 'dm' && role === 'admin';
+                            })() && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Shield className="w-3 h-3 text-blue-500 cursor-help" />
@@ -2337,7 +2769,12 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                               </Tooltip>
                             )}
                           </div>
-                          <span>{msg.time} {msg.edited && '(edited)'}</span>
+                          <span>
+                            {msg.time} {msg.edited && '(edited)'}
+                            {roomType === 'dm' && (
+                              <span className="ml-1">{getDmTicks(msg)}</span>
+                            )}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -2647,6 +3084,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                           userId={member.id}
                           userName={member.name}
                           isCurrentUser={String(member.id) === String(effectiveUserId)}
+                          isBlocked={isBlocked(member.id)}
                           onViewProfile={handleViewProfile}
                           onStartDM={handleStartDM}
                           onAddFriend={handleAddFriend}
@@ -2713,6 +3151,7 @@ export const ChatRoom = ({ roomId, roomName, roomType, participants, onBack, cur
                             userId={member.id}
                             userName={member.name}
                             isCurrentUser={String(member.id) === String(effectiveUserId)}
+                            isBlocked={isBlocked(member.id)}
                             onViewProfile={handleViewProfile}
                             onStartDM={handleStartDM}
                             onAddFriend={handleAddFriend}
